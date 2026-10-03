@@ -33,7 +33,7 @@ for name in $VARS; do
   [ -n "$value" ] || missing="$missing $name"
 done
 if [ -n "$missing" ]; then
-  die "в окружении нет значений:$missing — положите deploy/secrets.env скриптом deploy/put-secrets.sh" 2
+  die "в окружении нет значений:$missing — секреты кладёт deploy/put-secrets.sh, XRAY_TARGET задан в environment службы render в deploy/compose.yml" 2
 fi
 
 # Форма каждого значения проверяется здесь, а не у Xray: `xray run -test`
@@ -48,7 +48,9 @@ check UUID_MAC '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a
 check UUID_IPHONE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' 'UUID — вывод uuidgen'
 check SHORTID_MAC '^[0-9a-f]{8}$' '8 знаков hex в нижнем регистре — вывод openssl rand -hex 4'
 check SHORTID_IPHONE '^[0-9a-f]{8}$' '8 знаков hex в нижнем регистре — вывод openssl rand -hex 4'
-check XRAY_TARGET '^[A-Za-z0-9._-]+:[0-9]{1,5}$' 'хост:порт Caddy zpq-ai в сети edge, а именно zpq:443 — не caddy:443, под этим именем в edge живут два Caddy'
+# XRAY_TARGET приходит не из secrets.env, а из environment службы render в
+# deploy/compose.yml: это не секрет, и там его держит шаг CI.
+check XRAY_TARGET '^[A-Za-z0-9._-]+:[0-9]{1,5}$' 'хост:порт внутреннего слушателя Caddy zpq-ai с одной только маской — значение задано в deploy/compose.yml, а не в secrets.env'
 
 [ "$SHORTID_MAC" != "$SHORTID_IPHONE" ] || die 'SHORTID_MAC и SHORTID_IPHONE совпадают — отзыв одного устройства отозвал бы оба' 3
 [ "$UUID_MAC" != "$UUID_IPHONE" ] || die 'UUID_MAC и UUID_IPHONE совпадают — отзыв одного устройства отозвал бы оба' 3

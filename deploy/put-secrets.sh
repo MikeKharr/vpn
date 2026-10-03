@@ -33,19 +33,14 @@ fi
 ask() {
   local name="$1" prompt="$2" form="$3" hint="$4" value=''
   while true; do
-    if [ "$form" = 'plain' ]; then
-      printf '%s\n> ' "$prompt"
-      read -r value || true
-    else
-      printf '%s (ввод не отображается)\n> ' "$prompt"
-      read -rs value || true
-      printf '\n'
-    fi
+    printf '%s (ввод не отображается)\n> ' "$prompt"
+    read -rs value || true
+    printf '\n'
     if [ -z "$value" ]; then
       echo "Пусто — ничего не записано, выхожу." >&2
       exit 1
     fi
-    if [ "$form" = 'plain' ] || printf '%s' "$value" | grep -Eq "$form"; then
+    if printf '%s' "$value" | grep -Eq "$form"; then
       break
     fi
     echo "Не та форма: ожидается $hint. Повторите." >&2
@@ -60,13 +55,6 @@ ask UUID_MAC            'UUID устройства Mac'              "$UUID_RE" 
 ask UUID_IPHONE         'UUID устройства iPhone'           "$UUID_RE"            'UUID из uuidgen'
 ask SHORTID_MAC         'shortId устройства Mac'           '^[0-9a-f]{8}$'       '8 знаков hex, openssl rand -hex 4'
 ask SHORTID_IPHONE      'shortId устройства iPhone'        '^[0-9a-f]{8}$'       '8 знаков hex, openssl rand -hex 4'
-# Не секрет: это алиас Caddy проекта zpq-ai в сети edge, строка
-# межрепозиторного контракта (ADR, п. 1). Вводится видимо — скрывать нечего,
-# а опечатку в нём иначе не заметить.
-# Имя именно zpq: под именем caddy в сети edge отвечают два Caddy — zpq-ai и
-# адвента (ADR zpq-ai 2026-10-03-1544), и caddy:443 разрешился бы в любой.
-ask XRAY_TARGET         'Caddy zpq-ai в сети edge как хост:порт, а именно zpq:443' \
-                        '^[A-Za-z0-9._-]+:[0-9]{1,5}$' 'хост:порт'
 
 if [ "$UUID_MAC" = "$UUID_IPHONE" ] || [ "$SHORTID_MAC" = "$SHORTID_IPHONE" ]; then
   echo "Значения устройств совпали: отзыв одного отозвал бы оба. Ничего не записано." >&2
@@ -74,8 +62,12 @@ if [ "$UUID_MAC" = "$UUID_IPHONE" ] || [ "$SHORTID_MAC" = "$SHORTID_IPHONE" ]; t
 fi
 
 # Скрипт исполняется на сервере, значения приходят по одному в строке stdin.
-# Файл перезаписывается целиком: в нём ровно шесть строк, и «сохранить
+# Файл перезаписывается целиком: в нём ровно пять строк, и «сохранить
 # остальное» тут нечего — в отличие от общего secrets.env адвента.
+# XRAY_TARGET сюда НЕ попадает: это не секрет, а строка межрепозиторного
+# контракта, и она живёт в deploy/compose.yml, где её держит шаг CI. Иначе
+# смена одного не-секрета требовала бы заново ввести пять секретов
+# (находка reviewer).
 REMOTE_SCRIPT=$(cat <<REMOTE
 set -eu
 umask 077
@@ -86,7 +78,6 @@ read -r uuid_mac
 read -r uuid_iphone
 read -r sid_mac
 read -r sid_iphone
-read -r target
 tmp="\$(mktemp "\$(dirname "\$f")/.secrets.XXXXXX")"
 trap 'rm -f "\$tmp"' EXIT
 { echo '# Секреты VPN. Только на сервере, chmod 600. Создан deploy/put-secrets.sh.'
@@ -96,7 +87,6 @@ trap 'rm -f "\$tmp"' EXIT
   printf 'UUID_IPHONE=%s\n' "\$uuid_iphone"
   printf 'SHORTID_MAC=%s\n' "\$sid_mac"
   printf 'SHORTID_IPHONE=%s\n' "\$sid_iphone"
-  printf 'XRAY_TARGET=%s\n' "\$target"
 } > "\$tmp"
 mv "\$tmp" "\$f"
 trap - EXIT
@@ -110,18 +100,20 @@ REMOTE
 # SC2029: подстановка на стороне клиента здесь и нужна — REMOTE_SCRIPT собран
 # выше ровно для того, чтобы уехать текстом, как в put-secrets.sh адвента.
 # shellcheck disable=SC2029
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+printf '%s\n%s\n%s\n%s\n%s\n' \
   "$REALITY_PRIVATE_KEY" "$UUID_MAC" "$UUID_IPHONE" \
-  "$SHORTID_MAC" "$SHORTID_IPHONE" "$XRAY_TARGET" \
+  "$SHORTID_MAC" "$SHORTID_IPHONE" \
   | ssh "${ssh_args[@]}" "$SERVER" "$REMOTE_SCRIPT"
 
 cat <<'EOF'
 
 Осталось сделать:
-  1. Перезапустить контейнеры, иначе рендер работает с прежними значениями:
+  1. Пересоздать ОБА контейнера, иначе новые значения не вступят в силу:
+     render соберёт новый конфиг, а живой Xray продолжит работать с прежним —
+     он читает config.json один раз на старте и reload'а не умеет.
        push в main или workflow_dispatch «deploy» в GitHub Actions.
      Руками на сервере — только владельцу:
-       cd vpn/deploy && docker compose up -d --force-recreate render && docker compose up -d
+       cd vpn/deploy && docker compose up -d --force-recreate
   2. При ротации ключа или UUID — переустановить ссылки на обоих
      устройствах: bash bin/make-link.sh (в своём терминале).
 EOF

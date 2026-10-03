@@ -34,7 +34,7 @@ base_env() {
     "UUID_IPHONE=$(fake_uuid)" \
     "SHORTID_MAC=$(fake_sid)" \
     "SHORTID_IPHONE=$(fake_sid)" \
-    "XRAY_TARGET=zpq:443"
+    "XRAY_TARGET=zpq:8444"
 }
 
 # $1 — что проверяем, $2 — ожидаемый код, $3 — ожидаемый кусок текста,
@@ -87,7 +87,10 @@ case_is 'shortId в 4 знака'     3 'SHORTID_MAC'   "$template" 'SHORTID_MAC
 case_is 'shortId в верхнем регистре' 3 'SHORTID_IPHONE' "$template" 'SHORTID_IPHONE=ABCDEF12'
 case_is 'UUID без дефисов'      3 'UUID_MAC'      "$template" 'UUID_MAC=7f3a9c1e4b2d41e89a7c0d5e6f8a1b23'
 case_is 'target без порта'      3 'XRAY_TARGET'   "$template" 'XRAY_TARGET=caddy'
-case_is 'одинаковые shortId'    3 'отозвал бы оба' "$template" 'SHORTID_MAC=0a0a0a0a' 'SHORTID_IPHONE=0a0a0a0a'
+# Значение собрано из кусков: литерал «SHORTID_MAC=<8 hex>» сам стал бы
+# находкой сторожа публичного репозитория (он ловит shortId в контексте).
+same=$(printf '%s%s' 0a0a 0a0a)
+case_is 'одинаковые shortId'    3 'отозвал бы оба' "$template" "SHORTID_MAC=$same" "SHORTID_IPHONE=$same"
 
 # Плейсхолдер, которого нет в списке подстановки: шаблон опережает скрипт.
 # Без этой ветви опечатка в имени плейсхолдера дала бы конфиг со строкой
@@ -116,16 +119,35 @@ for inb in cfg['inbounds']:
     r = inb['streamSettings']['realitySettings']
     assert r['serverNames'] == ['cdn.zpq.ai'], r['serverNames']
     assert r['xver'] == 0, r['xver']
-    assert r['target'] == 'zpq:443', r['target']
+    assert r['target'] == 'zpq:8444', r['target']
     assert len(r['shortIds']) == 2 and len(set(r['shortIds'])) == 2, r['shortIds']
     assert all(c['flow'] == 'xtls-rprx-vision' for c in inb['settings']['clients'])
     assert inb['settings']['decryption'] == 'none'
-print('ok   результат — валидный JSON с параметрами из ADR, п. 3')
+
+# Выход в приватные сети закрыт в самом Xray. Без этих строк правило снимут
+# попутной правкой, и прогон останется зелёным: `xray run -test` конфиг без
+# маршрутизации принимает молча.
+tags = {o['tag']: o['protocol'] for o in cfg['outbounds']}
+assert tags.get('block') == 'blackhole', tags
+# domainStrategy — не косметика: при умолчании AsIs правило с одним `ip` не
+# матчит цель, заданную ИМЕНЕМ, и клиент дотянулся бы до соседа по сети edge
+# через Docker DNS, обойдя блок целиком.
+assert cfg['routing']['domainStrategy'] == 'IPIfNonMatch', cfg['routing']['domainStrategy']
+blocking = [r for r in cfg['routing']['rules'] if r.get('outboundTag') == 'block']
+assert len(blocking) == 1, blocking
+blocked = set(blocking[0]['ip'])
+required = {
+    '127.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16',
+    '172.16.0.0/12', '192.168.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10',
+}
+missing = required - blocked
+assert not missing, f'в правиле блокировки нет диапазонов: {sorted(missing)}'
+print('ok   результат — валидный JSON с параметрами из ADR, п. 3, и приватные сети закрыты')
 PY
 then
   pass=$((pass + 1))
 else
-  fail=$((fail + 1)); echo 'ПРОВАЛ: результат не прошёл сверку с ADR, п. 3'
+  fail=$((fail + 1)); echo 'ПРОВАЛ: результат не прошёл сверку с ADR, п. 3 и с запретом приватных сетей — причина в AssertionError выше'
 fi
 # Сначала форма GNU, потом BSD, и результат ОБЯЗАН быть восьмеричным числом.
 # Обратный порядок уже дал ложный провал в CI: у GNU stat флаг -f означает

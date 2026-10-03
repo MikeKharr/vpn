@@ -28,6 +28,14 @@ jobs:
       - name: Приманки краснят сторожа
         run: bash test/secrets-guard.test.sh
 
+      # Держатель требования «Xray пересоздан этой выкаткой»: приманки
+      # исполняют тот же deploy/assert-recreated.sh, который зовёт шаг
+      # выкатки на сервере. Главный случай — «тот же Id»: именно он
+      # воспроизводит дефект, из-за которого ротация ключа и отзыв устройства
+      # не вступали в силу при зелёной выкатке.
+      - name: Приманки проверки пересоздания Xray
+        run: bash test/assert-recreated.test.sh
+
   # Конфиг Xray. Сначала отказы рендера, потом само ядро на отрендеренном
   # шаблоне: `xray run -test` отвечает на вопрос «этот конфиг ядро примет»,
   # и отвечает тот же образ по тому же digest, что пойдёт на сервер.
@@ -75,6 +83,12 @@ jobs:
           # shellcheck disable=SC1091
           . ./temp/secrets.env
           set +a
+          # XRAY_TARGET берётся ИЗ compose, а не записан здесь второй раз: иначе
+          # CI рендерил бы конфиг с одним target, а сервер — с другим, и
+          # расхождение контракта прогон бы не заметил.
+          XRAY_TARGET=$(docker compose -f deploy/compose.yml config --format json | jq -r '.services.render.environment.XRAY_TARGET')
+          echo "XRAY_TARGET из compose: $XRAY_TARGET"
+          export XRAY_TARGET
           TEMPLATE=deploy/config.template.json OUT=temp/conf/config.json \
             sh deploy/render/render.sh
           # render.sh кладёт результат под 0400 и чужим владельцем не делает:
@@ -114,6 +128,26 @@ jobs:
             *" vpn "*) echo "ok: алиас vpn в сети edge на месте" ;;
             *) echo "::error::у службы xray нет алиаса vpn в сети edge — sni не найдёт её"; exit 1 ;;
           esac
+          # XRAY_TARGET — вторая строка межрепозиторного контракта, и держится
+          # она так же, как алиас `vpn`: сверкой со значением, записанным здесь.
+          # Прежде значение жило в secrets.env на сервере, где его не видел ни
+          # один шаг, и опечатка `caddy:443` прошла бы и проверку формы, и
+          # `xray run -test`, и выкатку — признаком остался бы только
+          # неподключающийся клиент (находка reviewer).
+          #
+          # Порт 8444, а не 443: отдельный внутренний слушатель Caddy проекта
+          # zpq-ai, за которым стоит только страница маски. Проброс в общий вход
+          # на 443 открывал бы клиенту VPN все имена машины — блокирующая к ADR
+          # zpq-ai 2026-10-03-1544. Смена значения — правка ЭТОЙ строки и строки
+          # в compose вместе, то есть видимая в диффе.
+          want_target='zpq:8444'
+          target=$(printf '%s' "$json" | jq -r '.services.render.environment.XRAY_TARGET // ""')
+          if [ "$target" != "$want_target" ]; then
+            echo "::error::XRAY_TARGET в compose равен '$target', а контракт требует '$want_target' — см. ADR 2026-10-03-0353, п. 1 и ADR zpq-ai 2026-10-03-1544"
+            exit 1
+          fi
+          echo "ok: XRAY_TARGET равен контрактному"
+
           # Секреты видит ТОЛЬКО render. Проверка идёт по упоминанию
           # `secrets.env` или имени REALITY_PRIVATE_KEY в службе целиком, а не
           # по полю env_file: `docker compose config` в разных версиях то
