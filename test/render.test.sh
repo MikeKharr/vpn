@@ -108,8 +108,15 @@ pairs=()
 while IFS= read -r line; do pairs+=("$line"); done < <(base_env)
 env -i PATH="$PATH" "${pairs[@]}" TEMPLATE="$template" OUT="$dir/config.json" bash "$render" >/dev/null
 if python3 - "$dir/config.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1]))
+import json, re, sys
+# Ядро Xray отбрасывает комментарии при чтении конфига, и в шаблоне они есть —
+# там объяснено, почему правило блокировки не ломает маскировку. json.load их
+# не понимает, поэтому снимаются строки, которые ЦЕЛИКОМ являются комментарием.
+# Хвостовой комментарий (`"xver": 0, // …`) этот снос НЕ трогает, и тогда
+# json.load падает — то есть ошибаться он может только в красную сторону.
+# Авторитет по «примет ли это ядро» остаётся за шагом CI `xray run -test`.
+raw = open(sys.argv[1]).read()
+cfg = json.loads(re.sub(r'(?m)^[ \t]*//.*$', '', raw))
 assert cfg['log'] == {'access': 'none', 'error': '', 'loglevel': 'warning', 'dnsLog': False}, cfg['log']
 ports = [i['port'] for i in cfg['inbounds']]
 assert ports == [443, 8443], ports
