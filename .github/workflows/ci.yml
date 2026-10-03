@@ -1,0 +1,188 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Сторож публичного репозитория и приманки к нему — в одном job. Красный
+  # сторож без приманок не отличим от сторожа, который краснеет всегда;
+  # зелёный без приманок — от сторожа, который не ловит ничего.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+
+      - name: Секреты не попали в репозиторий
+        run: bash .github/scripts/secrets-guard.sh .
+
+      - name: Приманки краснят сторожа
+        run: bash test/secrets-guard.test.sh
+
+  # Конфиг Xray. Сначала отказы рендера, потом само ядро на отрендеренном
+  # шаблоне: `xray run -test` отвечает на вопрос «этот конфиг ядро примет»,
+  # и отвечает тот же образ по тому же digest, что пойдёт на сервер.
+  #
+  # ЧТО ЭТОТ JOB НЕ ЛОВИТ: подключится ли устройство. `-test` разбирает
+  # конфиг и не поднимает слушателей, не ходит в target и не знает ни одного
+  # клиента. Рукопожатие проверяется только живым подключением с устройства
+  # (ADR 2026-10-03-0353, «Ручные шаги», п. 9).
+  config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+
+      - name: Отказы рендера громкие
+        run: bash test/render.test.sh
+
+      - name: Фиктивные значения для рендера
+        run: |
+          set -euo pipefail
+          # Значения создаются здесь и живут один прогон. Форма годная, суть
+          # фиктивная: ключ — случайные 32 байта, UUID — из ядра раннера.
+          # umask 077: файл не должен быть читаем лишним на раннере.
+          umask 077
+          mkdir -p temp
+          {
+            printf 'REALITY_PRIVATE_KEY=%s\n' "$(openssl rand 32 | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+            printf 'UUID_MAC=%s\n' "$(cat /proc/sys/kernel/random/uuid)"
+            printf 'UUID_IPHONE=%s\n' "$(cat /proc/sys/kernel/random/uuid)"
+            printf 'SHORTID_MAC=%s\n' "$(openssl rand -hex 4)"
+            printf 'SHORTID_IPHONE=%s\n' "$(openssl rand -hex 4)"
+            printf 'XRAY_TARGET=%s\n' 'zpq:443'
+          } > temp/secrets.env
+          # Тот же файл нужен `docker compose config` ниже: у единицы render
+          # он стоит required: true.
+          cp temp/secrets.env deploy/secrets.env
+
+      - name: Конфиг Xray проходит xray run -test
+        run: |
+          set -euo pipefail
+          mkdir -p temp/conf
+          # Исполняется deploy/render/render.sh — тот самый файл, что
+          # монтируется в единицу render на сервере. Копии рендера в CI нет.
+          set -a
+          # shellcheck disable=SC1091
+          . ./temp/secrets.env
+          set +a
+          TEMPLATE=deploy/config.template.json OUT=temp/conf/config.json \
+            sh deploy/render/render.sh
+          # render.sh кладёт результат под 0400 и чужим владельцем не делает:
+          # прогон идёт не от root. Образ Xray работает под uid 65532, и без
+          # этой строки он получил бы permission denied, а шаг — отказ,
+          # который выглядел бы отказом конфига.
+          chmod 644 temp/conf/config.json
+          # Образ берётся ИЗ compose, а не записан здесь второй раз: иначе
+          # CI проверял бы одну версию ядра, а сервер запускал другую.
+          image=$(docker compose -f deploy/compose.yml config --format json | jq -r '.services.xray.image')
+          echo "образ из compose: $image"
+          case "$image" in
+            *@sha256:*) ;;
+            *) echo "::error::образ Xray в compose не закреплён digest'ом"; exit 1 ;;
+          esac
+          docker run --rm -v "$PWD/temp/conf:/conf:ro" "$image" run -c /conf/config.json -test
+
+      - name: Compose разбирается и наружу не публикует ни одного порта
+        run: |
+          set -euo pipefail
+          json=$(docker compose -f deploy/compose.yml config --format json)
+          # Порт 8443 — ЗАКРЫТЫЙ запасной вход (ADR, п. 1). В конфиге Xray он
+          # описан и слушает внутри контейнера; опубликованным он становится
+          # только строкой ports, которую добавляет отдельный PR при откате.
+          # Без этой проверки такая строка уехала бы в прод незамеченной:
+          # `docker compose config` её разберёт и промолчит.
+          published=$(printf '%s' "$json" | jq -r '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] | join(" ")')
+          if [ -n "$published" ]; then
+            echo "::error::у служб есть опубликованные порты: $published — наружу этот проект не слушает ничего, вход приходит от единицы sni по сети edge"
+            exit 1
+          fi
+          echo "ok: ports нет ни у одной службы"
+          # Алиас в edge — строка межрепозиторного контракта: по нему sni
+          # проекта zpq-ai находит контейнер. Переименование тихо ломает VPN.
+          alias=$(printf '%s' "$json" | jq -r '.services.xray.networks.edge.aliases // [] | join(" ")')
+          case " $alias " in
+            *" vpn "*) echo "ok: алиас vpn в сети edge на месте" ;;
+            *) echo "::error::у службы xray нет алиаса vpn в сети edge — sni не найдёт её"; exit 1 ;;
+          esac
+          # Секреты видит ТОЛЬКО render. Проверка идёт по упоминанию
+          # `secrets.env` или имени REALITY_PRIVATE_KEY в службе целиком, а не
+          # по полю env_file: `docker compose config` в разных версиях то
+          # оставляет env_file путями, то разрешает его в environment, и
+          # проверка `has("env_file")` в одной из этих форм зеленела бы всегда,
+          # то есть молча не проверяла бы ничего. Сверено на четырёх формах
+          # вывода («Красная ветвь» в описании PR). Сам $json в журнал не
+          # печатается: в разрешённой форме он содержит значения.
+          # $svc — переменная jq, не shell: кавычки одинарные намеренно.
+          # shellcheck disable=SC2016
+          probe='.services[$svc] | tostring | test("REALITY_PRIVATE_KEY|secrets\\.env")'
+          holds_render=$(printf '%s' "$json" | jq -r --arg svc render "$probe")
+          holds_xray=$(printf '%s' "$json" | jq -r --arg svc xray "$probe")
+          # Положительный контроль: если бы `secrets.env` исчез из вывода и у
+          # render, значит форма вывода сменилась и проверка ниже мертва.
+          if [ "$holds_render" != true ]; then
+            echo "::error::в выводе compose нет связи render с secrets.env — форма вывода сменилась, и проверка «ключ не у xray» перестала что-либо проверять"
+            exit 1
+          fi
+          if [ "$holds_xray" = true ]; then
+            echo "::error::служба xray упоминает secrets.env или REALITY_PRIVATE_KEY — приватный ключ попал бы в её окружение; секреты видит только render"
+            exit 1
+          fi
+          echo "ok: секреты у render, у xray их нет"
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: shellcheck по скриптам
+        run: |
+          set -euo pipefail
+          files=$(git ls-files '*.sh')
+          echo "$files"
+          # Линтер не ставится отдельно: он есть на ubuntu-latest.
+          # SC2086: список имён нужен словами, имена файлов проекта без пробелов.
+          # shellcheck disable=SC2086
+          shellcheck $files
+
+  # actionlint по всем workflow: синтаксис, выражения ${{ }}, имена событий и
+  # shellcheck по телам run:.
+  #
+  # ЧТО ЭТОТ ШАГ НЕ ЛОВИТ: «подстраховки» вида `cmd || echo пусто`, из-за
+  # которых упавшая команда даёт зелёный результат. Для shellcheck это
+  # корректный код. Дефекты этого класса ловит только мутация, прогнанная
+  # автором («Красная ветвь» в описании PR).
+  #
+  # Версия образа закреплена: новый релиз линтера не должен краснить CI сам
+  # по себе — обновление отдельным PR, как у любого пина.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Линт workflow (actionlint + shellcheck по run:)
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.12 -color
+
+  # Единая обязательная проверка для защиты ветки: имя check run — id job.
+  ci-ok:
+    needs: [guard, config, shell, actionlint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Итог зависимостей
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "guard/config/shell/actionlint: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) echo "::error::есть failure или cancelled"; exit 1 ;;
+          esac

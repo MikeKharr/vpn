@@ -1,0 +1,178 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ['deploy/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      # Нужен каталог deploy: его содержимое и уезжает на сервер, в нём же
+      # лежит закреплённый ключ хоста. Токен на диске не сохраняется.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # Отдельный шаг и первым: без него отсутствующий секрет превращался бы
+      # в «Permission denied (publickey)» или в попытку сходить на пустое
+      # имя — то есть в отказ, который указывает не на причину. Секреты
+      # environment production заводит владелец (ADR 2026-10-03-0353,
+      # «Ручные шаги», п. 3), и до этого момента выкатка обязана говорить,
+      # чего именно нет.
+      - name: Секреты выкатки заведены
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          missing=''
+          [ -n "$SSH_KEY" ] || missing="$missing SSH_KEY"
+          [ -n "$SSH_HOST" ] || missing="$missing SSH_HOST"
+          [ -n "$SSH_USER" ] || missing="$missing SSH_USER"
+          if [ -n "$missing" ]; then
+            echo "::error::в environment production нет секретов:$missing — их заводит владелец (ADR 2026-10-03-0353, «Ручные шаги», п. 3); SSH_PORT необязателен, по умолчанию 22"
+            exit 1
+          fi
+          echo "ok: SSH_KEY, SSH_HOST и SSH_USER на месте"
+
+      # Секреты — через env шага, а не подстановкой в текст run: так их нет
+      # в файле скрипта шага и в команде, которую видит shell.
+      - name: Ключ доступа
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Ключ хоста ЗАКРЕПЛЁН в репозитории, а не выспрашивается у сервера:
+          # `ssh-keyscan >> known_hosts` на каждом прогоне принимал бы любой
+          # предъявленный ключ, то есть и подменённый. Образец и причина —
+          # адвент, ADR 2026-10-02-0921. Сервер тот же, ключ тот же файл.
+          #
+          # Закрепляется КЛЮЧ, а не имя: SSH_HOST — секрет, и в файле
+          # репозитория имени нет вовсе. Имя считается ДО записи, потому что
+          # ssh ищет запись в форме [host]:port, когда порт не 22.
+          name="$SSH_HOST"
+          [ "$SSH_PORT" = "22" ] || name="[$SSH_HOST]:$SSH_PORT"
+          key_file="$GITHUB_WORKSPACE/deploy/host-key.pub"
+          if [ ! -s "$key_file" ]; then
+            echo "::error::нет $key_file — закреплённый ключ хоста пропал из репозитория"
+            exit 1
+          fi
+          printf '%s %s\n' "$name" "$(cat "$key_file")" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          if ! ssh-keygen -F "$name" -f ~/.ssh/known_hosts >/dev/null; then
+            echo "::error::строка known_hosts не собралась для этого сервера"
+            exit 1
+          fi
+
+      # Файлы едут rsync'ом, а не git pull: git-клона этого репозитория на
+      # сервере нет и не будет — рядом с каталогом deploy лежит secrets.env,
+      # и чем меньше на сервере умеет этот каталог, тем лучше.
+      - name: Файлы каталога deploy на сервер
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          ssh -p "$SSH_PORT" -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" 'mkdir -p vpn/deploy'
+          # --delete: файл, убранный из репозитория, должен исчезнуть и на
+          # сервере — иначе старый шаблон или старый скрипт рендера остался бы
+          # жить рядом с новым compose.
+          # --exclude '*.env': secrets.env кладёт туда владелец, и rsync его
+          # НЕ трогает. Под --delete исключённое на приёмной стороне не
+          # удаляется, поэтому выкатка не сносит секреты. Это ровно то место,
+          # где ошибка стоила бы владельцу повторного ввода пяти значений.
+          rsync -az --delete \
+            --exclude='*.env' \
+            -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=yes" \
+            deploy/ "$SSH_USER@$SSH_HOST:vpn/deploy/"
+
+      - name: Выкатка
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          ssh -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=yes \
+              "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd ~/vpn/deploy
+
+          if [ ! -f secrets.env ]; then
+            echo "::error::на сервере нет vpn/deploy/secrets.env — его кладёт владелец скриптом deploy/put-secrets.sh; единица render стоит required: true и без файла проект не разберётся"
+            exit 1
+          fi
+          chmod 600 secrets.env
+
+          echo "==> пересоздание рендера: значения подставляются на его старте"
+          # --force-recreate именно у render: после put-secrets.sh строка его
+          # службы в compose.yml не меняется, образ закреплён digest'ом, и
+          # `up -d` контейнер не тронул бы — новый ключ молча остался бы
+          # старым. Пересоздать дешевле, чем держать вторую отметку
+          # применённого и вторую дыру в ней.
+          docker compose up -d --force-recreate render
+          docker compose up -d --remove-orphans
+          docker image prune -f --filter "until=168h" || true
+
+          echo "==> ожидание render: healthy"
+          state=none
+          for _ in $(seq 1 20); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' vpn-render-1 2>/dev/null || echo none)
+            [ "$state" = healthy ] && break
+            sleep 3
+          done
+          if [ "$state" != healthy ]; then
+            # Журнал рендера печатать можно: он сообщает ИМЕНА значений и коды
+            # отказа, но не сами значения (deploy/render/render.sh).
+            docker compose logs --tail 30 render
+            echo "::error::render не стал healthy: $state — конфиг не собран, Xray не поднимется"
+            exit 1
+          fi
+
+          echo "==> проверка, что Xray не перезапускается"
+          # 15 секунд и RestartCount: негодный конфиг даёт не «не поднялся», а
+          # крутящийся контейнер, который в `ps` выглядит живым пару секунд.
+          sleep 15
+          running=$(docker inspect --format '{{.State.Running}}' vpn-xray-1)
+          restarts=$(docker inspect --format '{{.RestartCount}}' vpn-xray-1)
+          echo "xray: Running=$running RestartCount=$restarts"
+          if [ "$running" != true ] || [ "$restarts" != 0 ]; then
+            # Журнал Xray — только последние строки и только при отказе:
+            # репозиторий публичный, журнал обращений выключен в конфиге
+            # (log.access: "none"), поэтому адресов клиентов здесь быть не
+            # может, а причина отказа конфига — может.
+            docker compose logs --tail 30 xray
+            echo "::error::контейнер xray не держится: Running=$running RestartCount=$restarts"
+            exit 1
+          fi
+
+          echo "==> состояние"
+          docker compose ps
+          REMOTE
+
+      - name: Чего выкатка не доказала
+        run: |
+          # Названо шагом, а не комментарием: зелёный прогон здесь легко
+          # прочитать как «VPN работает».
+          echo "Выкатка доказала: конфиг собран, контейнер держится, алиас vpn в сети edge."
+          echo "Выкатка НЕ доказала: что соединение доходит снаружи (это единица sni проекта zpq-ai),"
+          echo "что REALITY проходит рукопожатие и что устройство подключается."
+          echo "Проверка — живым подключением с Mac и iPhone (ADR 2026-10-03-0353, «Ручные шаги», п. 9)."

@@ -1,0 +1,104 @@
+{
+  "log": {
+    "access": "none",
+    "error": "",
+    "loglevel": "warning",
+    "dnsLog": false
+  },
+  "inbounds": [
+    {
+      "tag": "vless-443",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [
+          {
+            "email": "mac",
+            "id": "__UUID_MAC__",
+            "flow": "xtls-rprx-vision"
+          },
+          {
+            "email": "iphone",
+            "id": "__UUID_IPHONE__",
+            "flow": "xtls-rprx-vision"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "tcpSettings": {
+          "acceptProxyProtocol": true
+        },
+        "realitySettings": {
+          "show": false,
+          "target": "__XRAY_TARGET__",
+          "xver": 0,
+          "serverNames": [
+            "cdn.zpq.ai"
+          ],
+          "privateKey": "__REALITY_PRIVATE_KEY__",
+          "shortIds": [
+            "__SHORTID_MAC__",
+            "__SHORTID_IPHONE__"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": false
+      }
+    },
+    {
+      "tag": "vless-8443",
+      "listen": "0.0.0.0",
+      "port": 8443,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [
+          {
+            "email": "mac",
+            "id": "__UUID_MAC__",
+            "flow": "xtls-rprx-vision"
+          },
+          {
+            "email": "iphone",
+            "id": "__UUID_IPHONE__",
+            "flow": "xtls-rprx-vision"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        },
+        "realitySettings": {
+          "show": false,
+          "target": "__XRAY_TARGET__",
+          "xver": 0,
+          "serverNames": [
+            "cdn.zpq.ai"
+          ],
+          "privateKey": "__REALITY_PRIVATE_KEY__",
+          "shortIds": [
+            "__SHORTID_MAC__",
+            "__SHORTID_IPHONE__"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ]
+}
