@@ -127,7 +127,18 @@ then
 else
   fail=$((fail + 1)); echo 'ПРОВАЛ: результат не прошёл сверку с ADR, п. 3'
 fi
-perm=$(stat -f '%Lp' "$dir/config.json" 2>/dev/null || stat -c '%a' "$dir/config.json")
+# Сначала форма GNU, потом BSD, и результат ОБЯЗАН быть восьмеричным числом.
+# Обратный порядок уже дал ложный провал в CI: у GNU stat флаг -f означает
+# «сведения о файловой системе», он успешно печатает блоки и иноды, а `||`
+# при коде 0 не срабатывает — проверка сравнивала права с выводом про ext4
+# и печатала «400, а не 400».
+perm=$(stat -c '%a' "$dir/config.json" 2>/dev/null || true)
+case "$perm" in
+  ''|*[!0-7]*) perm=$(stat -f '%Lp' "$dir/config.json") ;;
+esac
+case "$perm" in
+  ''|*[!0-7]*) echo "ПРОВАЛ: права файла не прочитались ни одной формой stat: «$perm»"; exit 2 ;;
+esac
 if [ "$perm" = 400 ]; then
   pass=$((pass + 1)); echo 'ok   права результата — 400'
 else
