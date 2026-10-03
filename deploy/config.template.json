@@ -1,0 +1,143 @@
+{
+  "log": {
+    "access": "none",
+    "error": "",
+    "loglevel": "warning",
+    "dnsLog": false
+  },
+  "inbounds": [
+    {
+      "tag": "vless-443",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [
+          {
+            "email": "mac",
+            "id": "__UUID_MAC__",
+            "flow": "xtls-rprx-vision"
+          },
+          {
+            "email": "iphone",
+            "id": "__UUID_IPHONE__",
+            "flow": "xtls-rprx-vision"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "tcpSettings": {
+          "acceptProxyProtocol": true
+        },
+        "realitySettings": {
+          "show": false,
+          "target": "__XRAY_TARGET__",
+          "xver": 0,
+          "serverNames": [
+            "cdn.zpq.ai"
+          ],
+          "privateKey": "__REALITY_PRIVATE_KEY__",
+          "shortIds": [
+            "__SHORTID_MAC__",
+            "__SHORTID_IPHONE__"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": false
+      }
+    },
+    {
+      "tag": "vless-8443",
+      "listen": "0.0.0.0",
+      "port": 8443,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [
+          {
+            "email": "mac",
+            "id": "__UUID_MAC__",
+            "flow": "xtls-rprx-vision"
+          },
+          {
+            "email": "iphone",
+            "id": "__UUID_IPHONE__",
+            "flow": "xtls-rprx-vision"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        },
+        "realitySettings": {
+          "show": false,
+          "target": "__XRAY_TARGET__",
+          "xver": 0,
+          "serverNames": [
+            "cdn.zpq.ai"
+          ],
+          "privateKey": "__REALITY_PRIVATE_KEY__",
+          "shortIds": [
+            "__SHORTID_MAC__",
+            "__SHORTID_IPHONE__"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  // Маршрутизация. Правило ниже закрывает клиенту приватные диапазоны.
+  //
+  // МАСКИРОВКУ ЭТО НЕ ЛОМАЕТ, и это проверено по исходнику, а не выведено:
+  // REALITY набирает свой target плоским net.Dialer МИМО маршрутизации
+  // (transport/internet/reality/config.go — `var dialer net.Dialer`,
+  // `DialContext: dialer.DialContext`; вызов в XTLS/REALITY/tls.go). Поэтому
+  // проброс неаутентифицированного зонда в Caddy работает как и без правила,
+  // хотя target — приватный адрес в сети edge. Сверка compliance, круг 1.
+  //
+  // domainStrategy обязателен: при умолчании AsIs правило с одним `ip` не
+  // матчит цель, заданную ИМЕНЕМ, и клиент дотянулся бы до соседа по edge
+  // через Docker DNS, обойдя блок целиком.
+  //
+  // Комментарии в этом файле законны: ядро Xray их отбрасывает при чтении
+  // (проверено прогоном `xray run -test` на файле с такой строкой).
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "block",
+        "ip": [
+          "127.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ]
+      }
+    ]
+  }
+}
