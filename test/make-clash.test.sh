@@ -226,6 +226,7 @@ have_line '  enhanced-mode: redir-host'
 have_line '    - https://1.1.1.1/dns-query#PROXY'
 have_line '  proxy-server-nameserver:'
 have_line '    - https://1.1.1.1/dns-query'
+have_line '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT'
 # Обратный слэш в файле ОДИН: это регулярное выражение mihomo. Удвоение в
 # формате printf — деталь printf, и если оно уедет в файл, mihomo получит
 # другое выражение.
@@ -251,12 +252,22 @@ if [ "$(printf '%s\n' "$rules" | tail -n 1)" = '  - MATCH,PROXY' ]; then
 else
   bad 'MATCH,PROXY не последнее правило'
 fi
-# Обход для Яндекса — первым: стоящее выше правило уводило бы его трафик
-# раньше, чем до него дойдёт очередь.
-if [ "$(printf '%s\n' "$rules" | head -n 1)" = '  - PROCESS-PATH-REGEX,^/Applications/Yandex\.app/,DIRECT' ]; then
-  ok 'правило по пути процесса — первое'
+# Отказ по QUIC — ПЕРВЫМ правилом. Ниже любого правила, уводящего трафик
+# (включая обход Яндекса и MATCH,PROXY), он не сработал бы для соединений,
+# которые то правило забрало раньше, — а именно через MATCH,PROXY UDP 443 и
+# уходил в туннель, из-за чего Chrome не открывал страницы Google
+# (проверено на Mac 2026-10-05, запись 2026-10-04-1912).
+if [ "$(printf '%s\n' "$rules" | head -n 1)" = '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' ]; then
+  ok 'отказ по UDP 443 (QUIC) — первое правило'
 else
-  bad 'правило по пути процесса не первое'
+  bad 'отказ по UDP 443 (QUIC) не первое правило'
+fi
+# Обход для Яндекса — сразу за отказом по QUIC: любое правило выше уводило бы
+# его трафик раньше, чем до него дойдёт очередь.
+if [ "$(printf '%s\n' "$rules" | sed -n 2p)" = '  - PROCESS-PATH-REGEX,^/Applications/Yandex\.app/,DIRECT' ]; then
+  ok 'правило по пути процесса — сразу за отказом по QUIC'
+else
+  bad 'правило по пути процесса не второе'
 fi
 
 # В файле не должно остаться незаполненного места под значение.

@@ -128,6 +128,12 @@ dns:
     - https://1.1.1.1/dns-query
 
 rules:
+  # QUIC (UDP 443) в туннеле Vision ломает Chrome: страницы Google не
+  # открывались, пока UDP 443 уходил через VPN (проверено 2026-10-05).
+  # REJECT роняет попытку сразу, и Chrome сам переходит на TCP; клиент
+  # Vision в самом Xray по умолчанию делает то же. Остальной UDP — DNS 53,
+  # NTP 123 — идёт через туннель как раньше.
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - PROCESS-PATH-REGEX,^/Applications/Yandex\\.app/,DIRECT
   - DOMAIN-SUFFIX,zpq.ai,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
