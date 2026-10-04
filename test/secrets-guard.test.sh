@@ -96,6 +96,23 @@ case_is 'публичный ключ назван по-русски' 1 \
   "agent_docs/notes.md	публичный ключ REALITY: $key43"
 case_is 'shortId в контексте' 1 \
   "docs/devices.md	shortId устройства: $shortid"
+# Формы из профиля mihomo (bin/make-clash.sh): ключ и shortId там названы
+# `public-key` и `short-id` — через дефис, а не как в выводе xray или в
+# ссылке. Каждая форма отдельным случаем, по одной улике в файле: иначе
+# красный код не отличал бы «сторож видит public-key» от «сторож видит UUID
+# рядом».
+case_is 'ключ как public-key: — форма профиля mihomo' 1 \
+  "clash-mac.yaml	      public-key: $key43"
+case_is 'shortId как short-id: — форма профиля mihomo' 1 \
+  "clash-mac.yaml	      short-id: $shortid"
+case_is 'собранный профиль mihomo с UUID' 1 \
+  "clash-mac.yaml	proxies:\n  - name: vpn\n    uuid: $uuid\n"
+# А шаблон БЕЗ значений — тот, что лежит в bin/make-clash.sh и в публичном
+# репозитории, — находкой быть не должен: иначе держатель краснел бы на самом
+# себе и его пришлось бы исключать из проверки, то есть выключить. Те же
+# строки, что в скрипте, с %s вместо значений.
+case_is 'шаблон профиля mihomo с %s не находка' 0 \
+  "bin/make-clash.sh	    uuid: %s\n    reality-opts:\n      public-key: %s\n      short-id: %s\n"
 case_is 'shortId как SHORTID_MAC=' 1 \
   "notes.md	SHORTID_MAC=$shortid"
 # Держатель ветви vless://: идентификатор не подходит под форму UUID версий
