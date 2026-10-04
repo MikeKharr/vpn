@@ -71,7 +71,7 @@ for cmd in grep mkdir chmod; do
       # chmod существует, и закрывает его только umask.
       printf 'for a; do :; done\n'
       # shellcheck disable=SC2016
-      printf 'm=$(%s -f "%%Lp" "$a" 2>/dev/null || %s -c "%%a" "$a")\n' "$stat_abs" "$stat_abs"
+      printf 'm=$(%s -c "%%a" "$a" 2>/dev/null || %s -f "%%Lp" "$a")\n' "$stat_abs" "$stat_abs"
       # shellcheck disable=SC2016
       printf 'printf "%%s %%s\\n" "$m" "$a" >> "%s"\n' "$work/birth.log"
     fi
@@ -109,8 +109,13 @@ assert_no_leak() {
 }
 
 mode_of() {
-  # stat на macOS и в GNU coreutils зовётся по-разному.
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  # stat на macOS и в GNU coreutils зовётся по-разному, и порядок попыток
+  # здесь несущий: у GNU `-f` ЕСТЬ и означает `--file-system`, то есть
+  # BSD-форма на Linux не падает, а печатает несколько строк про файловую
+  # систему — и сверка прав сравнивала бы права с этим текстом. Проверено на
+  # ubuntu-latest: первая редакция с `-f` впереди покраснела именно так.
+  # Поэтому сначала GNU `-c`, которого у BSD stat нет вовсе.
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 # --- 1. Обычный прогон на чистом HOME ---------------------------------------
@@ -224,7 +229,10 @@ else
 fi
 
 # В файле не должно остаться незаполненного места под значение.
-if grep -qE '%s|__[A-Z_]+__|<[A-ZА-Я_]+>' "$want"; then
+# Образец без кириллических диапазонов: `[А-Я]` в C-локали даёт «Invalid
+# collation character», то есть grep отказывается, а не отвечает. Угловой
+# плейсхолдер ADR с кириллицей ищется отдельной строкой как литерал.
+if grep -qE '%s|__[A-Z_]+__|<[A-Z_]+>' "$want" || grep -qF '<П' "$want"; then
   bad 'в файле остался плейсхолдер'
 else
   ok 'плейсхолдеров в файле не осталось'
