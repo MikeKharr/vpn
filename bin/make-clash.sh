@@ -128,6 +128,12 @@ dns:
     - https://1.1.1.1/dns-query
 
 rules:
+  # QUIC (UDP 443) в туннеле Vision ломает Chrome: страницы Google не
+  # открывались, пока UDP 443 уходил через VPN (проверено 2026-10-05).
+  # REJECT роняет попытку сразу, и Chrome сам переходит на TCP; клиент
+  # Vision в самом Xray по умолчанию делает то же. Остальной UDP — DNS 53,
+  # NTP 123 — идёт через туннель как раньше.
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - PROCESS-PATH-REGEX,^/Applications/Yandex\\.app/,DIRECT
   - DOMAIN-SUFFIX,zpq.ai,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
@@ -154,8 +160,9 @@ rules:
 # встроенное имя; стоит ли any:53 в настройках TUN по умолчанию; матчится ли
 # DOMAIN-SUFFIX,zpq.ai при redir-host без включённого sniffer. И отдельно —
 # видит ли proc_pidpath из службы root helper-процессы Яндекса: от этого зависит
-# ПЕРВОЕ правило этого профиля (ADR называет это ожидаемым, потому что root,
-# но живой проверки не было).
+# правило PROCESS-PATH-REGEX этого профиля — второе, сразу за отказом по
+# UDP 443 (ADR называет это ожидаемым, потому что root, но живой проверки
+# не было).
 #
 # После импорта в Verge (New profile -> local -> выбрать файл) Verge хранит
 # свою копию, и этот файл можно удалить: rm -P
