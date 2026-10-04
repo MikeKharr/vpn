@@ -42,6 +42,12 @@
 5. Мерж PR `zpq-ai` с единицей `sni` — окно простоя 5–20 с на 443 и 80.
 6. Happ по идентификатору `id6504287215`, затем `bash bin/make-link.sh mac`
    и `bash bin/make-link.sh iphone`.
+7. На Mac в Happ: Settings → Tunnel Settings → **Xray TUN включить**, Mux
+   оставить выключенным (несовместим с Vision). С реализацией TUN по
+   умолчанию весь UDP в туннеле не проходит — DNS по UDP 53 и NTP 123
+   отваливаются по таймауту при живом TCP (запись истории
+   [2026-10-04-0513](agent_docs/development-history/2026-10-04-0513-udp-xray-tun.md)).
+   Нужен ли тот же переключатель на iPhone — не проверено.
 
 ## Откат
 
