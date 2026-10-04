@@ -152,7 +152,10 @@ rules:
 # рукопожатие mihomo chrome + support-x25519mlkem768 с Xray 26.9.30;
 # принимает ли суффикс #PROXY в nameserver имя ГРУППЫ, а не только
 # встроенное имя; стоит ли any:53 в настройках TUN по умолчанию; матчится ли
-# DOMAIN-SUFFIX,zpq.ai при redir-host без включённого sniffer.
+# DOMAIN-SUFFIX,zpq.ai при redir-host без включённого sniffer. И отдельно —
+# видит ли proc_pidpath из службы root helper-процессы Яндекса: от этого зависит
+# ПЕРВОЕ правило этого профиля (ADR называет это ожидаемым, потому что root,
+# но живой проверки не было).
 #
 # После импорта в Verge (New profile -> local -> выбрать файл) Verge хранит
 # свою копию, и этот файл можно удалить: rm -P
