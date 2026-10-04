@@ -21,6 +21,7 @@
 | `deploy/secrets.env.example` | Какие пять значений нужны и какой они формы. |
 | `deploy/host-key.pub` | Закреплённый ключ хоста для выкатки. Имя сервера — секрет, его здесь нет. |
 | `bin/make-link.sh` | Собирает ссылки `vless://` и рисует QR **в терминале**. Ничего не пишет в файлы. |
+| `bin/make-clash.sh` | Собирает профиль mihomo для Clash Verge Rev на Mac скрытым вводом в `~/Library/Application Support/vpn/clash-mac.yaml` (`0600`). Запускает владелец. |
 | `.github/scripts/secrets-guard.sh` | Сторож: краснеет на UUID, ссылке `vless://`, ключе REALITY (формы `Key`, `Password`, `pbk`, «ключ»), shortId в контексте и изображении. Чего он НЕ держит — сказано в `AGENTS.md`. |
 | `test/` | Приманки сторожа, отказы рендера и приманки проверки пересоздания. |
 
@@ -54,6 +55,13 @@
    гостевых сетей). Fake DNS в профиле не включать — с ним имена не
    разрешаются (запись истории
    [2026-10-04-0710](agent_docs/development-history/2026-10-04-0710-dns-leak-mac.md)).
+9. Mac с 2026-10-05 — Clash Verge Rev вместо Happ, ради обхода VPN одним
+   приложением (Яндекс Браузер): ADR
+   [2026-10-04-1726](agent_docs/adr/2026-10-04-1726-mac-client-per-app-bypass.md),
+   профиль — `bash bin/make-clash.sh`. Шаги 7–8 про Happ остаются для
+   iPhone и для отката. После смены сети проверить маршруты: если сайты
+   показывают не адрес сервера — выключить и включить Tun Mode (запись
+   истории [2026-10-04-1842](agent_docs/development-history/2026-10-04-1842-mac-verge-verified.md)).
 
 ## Откат
 
