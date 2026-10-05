@@ -14,15 +14,29 @@
 #     по stdin, иначе её было бы видно в `ps`;
 #   - не трогает приватный ключ REALITY: в ссылке стоит ПУБЛИЧНЫЙ (pbk).
 #
-# На каждое устройство выходит две ссылки: :443 — рабочая, :8443 — запасная
-# на случай отката единицы `sni` в zpq-ai. Вторую импортировать выключенной.
+# На каждое устройство выходит две ссылки, и обе на порт 443 — разница в
+# АДРЕСЕ (ADR 2026-10-05-1546, п. 5):
+#   рабочая  — ИМЕНЕМ cdn.zpq.ai: адрес берётся из DNS, а A-запись смотрит на
+#              второй адрес машины, где Xray публикует 443 сам. Поэтому при
+#              переезде на второй адрес эта ссылка не менялась и
+#              переимпортировать её не нужно;
+#   запасная — ПРЕЖНИМ адресом 45.91.134.19 с тем же `sni=cdn.zpq.ai`, то есть
+#              прежним путём через единицу `sni` проекта zpq-ai, МИНУЯ DNS.
+#              Это путь на случай, когда новый адрес недоступен или A-запись
+#              ещё не переехала. Импортировать её ВЫКЛЮЧЕННОЙ.
+# Прежняя запасная ссылка была `cdn.zpq.ai:8443`; снаружи 8443 больше нет
+# нигде, и она мертва.
 #
 # Запуск:  bash bin/make-link.sh [имя-устройства]
 set -euo pipefail
 
 SERVER_NAME="${SERVER_NAME:-cdn.zpq.ai}"
+# Порт у обеих ссылок один — 443: и прямой вход в Xray на новом адресе, и
+# единица `sni` на прежнем слушают его.
 PORT_MAIN="${PORT_MAIN:-443}"
-PORT_FALLBACK="${PORT_FALLBACK:-8443}"
+# Прежний адрес машины — тот, к которому привязана единица `sni` проекта
+# zpq-ai. Не секрет: он публичен и записан в ADR 2026-10-05-1546, п. 3 и 5.
+FALLBACK_ADDR="${FALLBACK_ADDR:-45.91.134.19}"
 # chrome, а не firefox: при ядре Xray >= 26.9.8 гибридный key share
 # X25519MLKEM768 в utls есть только у chrome (ADR, п. 3). Цена названа там же —
 # именно chrome режут на части мобильных сетей.
@@ -63,14 +77,18 @@ ask UUID       "UUID устройства $label"  \
 ask SHORT_ID   "shortId устройства $label" \
                '^[0-9a-f]{8}$' '8 знаков hex'
 
+# Адрес и `sni=` — РАЗНЫЕ параметры: у рабочей ссылки они совпадают (имя
+# cdn.zpq.ai), у запасной адрес — прежний IP, а `sni` остаётся именем маски.
+# Иначе REALITY не нашёл бы его в `serverNames`, и рукопожатие не состоялось
+# бы ни по одному пути.
 link() {
-  local port="$1" suffix="$2"
+  local addr="$1" port="$2" suffix="$3"
   printf 'vless://%s@%s:%s?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=%s&fp=%s&pbk=%s&sid=%s#%s\n' \
-    "$UUID" "$SERVER_NAME" "$port" "$SERVER_NAME" "$FINGERPRINT" "$PUBLIC_KEY" "$SHORT_ID" "${label}${suffix}"
+    "$UUID" "$addr" "$port" "$SERVER_NAME" "$FINGERPRINT" "$PUBLIC_KEY" "$SHORT_ID" "${label}${suffix}"
 }
 
-main_link=$(link "$PORT_MAIN" '')
-fallback_link=$(link "$PORT_FALLBACK" '-fallback')
+main_link=$(link "$SERVER_NAME" "$PORT_MAIN" '')
+fallback_link=$(link "$FALLBACK_ADDR" "$PORT_MAIN" '-fallback')
 
 show() {
   local title="$1" value="$2"
@@ -90,14 +108,17 @@ show() {
   fi
 }
 
-show "$label — рабочая, порт $PORT_MAIN" "$main_link"
-show "$label — запасная, порт $PORT_FALLBACK (импортировать выключенной)" "$fallback_link"
+show "$label — рабочая: имя $SERVER_NAME, порт $PORT_MAIN" "$main_link"
+show "$label — запасная: прежний адрес $FALLBACK_ADDR через sni, порт $PORT_MAIN (импортировать выключенной)" "$fallback_link"
 
 cat <<EOF
 
 Дальше:
-  1. Импортировать рабочую ссылку в Happ (id6504287215), запасную — в список,
-     выключенной.
+  1. Рабочую ссылку (имя ${SERVER_NAME}, адрес из DNS) импортировать в Happ
+     (id6504287215). Если она уже импортирована — переимпортировать не нужно:
+     при переезде на второй адрес она не менялась, клиент переехал по DNS.
+     Запасную (прежний адрес ${FALLBACK_ADDR} через единицу sni, минуя DNS) —
+     в список, ВЫКЛЮЧЕННОЙ: она нужна, когда новый адрес недоступен.
   2. Правила маршрутизации: direct на zpq.ai, challenge.zpq.ai, mail.zpq.ai,
      ${SERVER_NAME} и локальные сети — иначе трафик к своему же серверу идёт
      петлёй через него.
