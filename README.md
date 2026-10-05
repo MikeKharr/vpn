@@ -67,9 +67,32 @@ ADR 2026-10-05-1546, «Ручные шаги».
    [2026-10-05-1546](agent_docs/adr/2026-10-05-1546-second-ip-xray-direct-happ-back.md),
    п. 6. Шаги 7–8 действуют для обоих устройств. Снятие Verge: Tun Mode
    выключить → Settings → Uninstall Service → выйти →
-   `brew uninstall --cask clash-verge-rev --zap` (`--zap` уносит копию
-   профиля `0644` со значениями). Обход VPN для Яндекс Браузера на Happ
-   недоступен — так решено (там же).
+   `brew uninstall --cask clash-verge-rev --zap`. Обход VPN для Яндекс
+   Браузера на Happ недоступен — так решено (там же).
+
+   `--zap` ДОЛЖЕН унести и копию профиля, которую Verge держит `0644` со
+   значениями (ADR 2026-10-04-1726, «Дополнение 2026-10-05», п. 2), и файл
+   прежнего генератора. Что он их унёс — проверить, а не поверить; вывод
+   команды различает оба исхода:
+
+   ```sh
+   find ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev \
+        ~/Library/Application\ Support/vpn -name '*.yaml' -print 2>/dev/null \
+     | grep . && echo 'ФАЙЛЫ СО ЗНАЧЕНИЯМИ НА МЕСТЕ' || echo 'файлов нет — чисто'
+   ```
+
+   Если пути напечатаны — в них лежат UUID, `public-key` и `short-id`,
+   читаемые любому пользователю машины, и каталоги снимаются руками:
+
+   ```sh
+   rm -rf ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev \
+          ~/Library/Application\ Support/vpn
+   ```
+
+   Если файл со значениями мог прочитать кто-то ещё (общая машина, бэкап,
+   синхронизация каталога) — снять каталог недостаточно, нужна ротация UUID
+   и shortId: новые значения через `bash deploy/put-secrets.sh` и
+   переимпорт ссылок. Это решение владельца, а не шаг по умолчанию.
 
 ## Откат
 
