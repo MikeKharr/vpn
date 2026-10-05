@@ -15,6 +15,10 @@ UUID и shortId не меняются: пара значений Mac перее�
 Исполняющие PR: `bin/make-clash.sh` (раздел «Как секреты попадают в
 YAML») и ссылка в README — отдельно, классы A и C.
 
+Заменён в части клиента Mac решением владельца 2026-10-05: Mac возвращается
+на Happ, Verge снят, `bin/make-clash.sh` удалён (ADR
+[2026-10-05-1546](2026-10-05-1546-second-ip-xray-direct-happ-back.md)).
+
 ## Решение
 
 **На Mac — Clash Verge Rev (GPL-3.0, ядро mihomo), режим TUN через

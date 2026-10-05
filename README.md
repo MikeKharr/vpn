@@ -24,7 +24,6 @@ Happ на Mac и iPhone.
 | `deploy/secrets.env.example` | Какие пять значений нужны и какой они формы. |
 | `deploy/host-key.pub` | Закреплённый ключ хоста для выкатки. Имя сервера — секрет, его здесь нет. |
 | `bin/make-link.sh` | Собирает ссылки `vless://` и рисует QR **в терминале**. Ничего не пишет в файлы. Рабочая ссылка — именем `cdn.zpq.ai` (адрес из DNS), запасная — прежним адресом `45.91.134.19` с тем же `sni`, минуя DNS. |
-| `bin/make-clash.sh` | Собирает профиль mihomo для Clash Verge Rev на Mac скрытым вводом в `~/Library/Application Support/vpn/clash-mac.yaml` (`0600`). Запускает владелец. |
 | `.github/scripts/secrets-guard.sh` | Сторож: краснеет на UUID, ссылке `vless://`, ключе REALITY (формы `Key`, `Password`, `pbk`, «ключ»), shortId в контексте и изображении. Чего он НЕ держит — сказано в `AGENTS.md`. |
 | `test/` | Приманки сторожа, отказы рендера и приманки проверки пересоздания. |
 
@@ -64,19 +63,36 @@ ADR 2026-10-05-1546, «Ручные шаги».
    гостевых сетей). Fake DNS в профиле не включать — с ним имена не
    разрешаются (запись истории
    [2026-10-04-0710](agent_docs/development-history/2026-10-04-0710-dns-leak-mac.md)).
-9. Mac с 2026-10-05 — Clash Verge Rev вместо Happ, ради обхода VPN одним
-   приложением (Яндекс Браузер): ADR
-   [2026-10-04-1726](agent_docs/adr/2026-10-04-1726-mac-client-per-app-bypass.md),
-   профиль — `bash bin/make-clash.sh`. Шаги 7–8 про Happ остаются для
-   iPhone и для отката. После смены сети проверить маршруты: если сайты
-   показывают не адрес сервера — выключить и включить Tun Mode (запись
-   истории [2026-10-04-1842](agent_docs/development-history/2026-10-04-1842-mac-verge-verified.md)).
-   После импорта профиля в Verge — закрыть его копию со значениями, она
-   рождается `0644`:
-   `chmod 600 ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev/profiles/*.yaml`.
-   Шаг не разовый: Verge может вернуть `0644` при повторном импорте или
-   обновлении профиля (не проверено) — права проверять после каждого
-   импорта (ADR 2026-10-04-1726, «Дополнение 2026-10-05», п. 2).
+9. Mac с 2026-10-05 — снова Happ, Clash Verge Rev снят: ADR
+   [2026-10-05-1546](agent_docs/adr/2026-10-05-1546-second-ip-xray-direct-happ-back.md),
+   п. 6. Шаги 7–8 действуют для обоих устройств. Снятие Verge: Tun Mode
+   выключить → Settings → Uninstall Service → выйти →
+   `brew uninstall --cask clash-verge-rev --zap`. Обход VPN для Яндекс
+   Браузера на Happ недоступен — так решено (там же).
+
+   `--zap` ДОЛЖЕН унести и копию профиля, которую Verge держит `0644` со
+   значениями (ADR 2026-10-04-1726, «Дополнение 2026-10-05», п. 2), и файл
+   прежнего генератора. Что он их унёс — проверить, а не поверить; вывод
+   команды различает оба исхода:
+
+   ```sh
+   find ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev \
+        ~/Library/Application\ Support/vpn -name '*.yaml' -print 2>/dev/null \
+     | grep . && echo 'ФАЙЛЫ СО ЗНАЧЕНИЯМИ НА МЕСТЕ' || echo 'файлов нет — чисто'
+   ```
+
+   Если пути напечатаны — в них лежат UUID, `public-key` и `short-id`,
+   читаемые любому пользователю машины, и каталоги снимаются руками:
+
+   ```sh
+   rm -rf ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev \
+          ~/Library/Application\ Support/vpn
+   ```
+
+   Если файл со значениями мог прочитать кто-то ещё (общая машина, бэкап,
+   синхронизация каталога) — снять каталог недостаточно, нужна ротация UUID
+   и shortId: новые значения через `bash deploy/put-secrets.sh` и
+   переимпорт ссылок. Это решение владельца, а не шаг по умолчанию.
 
 ## Откат
 
