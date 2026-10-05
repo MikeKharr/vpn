@@ -17,8 +17,30 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: production
     steps:
+      # Первым шагом и ДО checkout. С переездом секретов выкатки на уровень
+      # репозитория (ADR 2026-10-05-1643) они видны прогону с ЛЮБОЙ ветки, а
+      # `workflow_dispatch` запускается с ветки на выбор — и несёт на прод
+      # каталог `deploy` ТОЙ ветки. Снаружи файла ветку ограничивала бы только
+      # политика ветвей environment'а; её здесь никогда не было
+      # (`deployment_branch_policy: null` у `production` на 2026-10-05), а
+      # после снятия `environment:` нет и места для неё. Поэтому проверка
+      # живёт в файле.
+      #
+      # Краснеет, а не пропускает job через `if:` на job: пропущенный job
+      # красит прогон серой галочкой, которую легко прочитать как
+      # «выкатилось». Здесь такое чтение уже стоило бы ровно того, от чего
+      # предостерегает последний шаг этого же файла.
+      - name: Выкатка только из main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != refs/heads/main ]; then
+            echo "::error::выкатка запущена с «$REF», а не с refs/heads/main — прод катается только из main (ADR 2026-10-05-1643). Смержите PR или запустите workflow_dispatch на ветке main"
+            exit 1
+          fi
+          echo "ok: ref = $REF"
+
       # Нужен каталог deploy: его содержимое и уезжает на сервер, в нём же
       # лежит закреплённый ключ хоста. Токен на диске не сохраняется.
       - uses: actions/checkout@v4
@@ -30,9 +52,14 @@ jobs:
       # Отдельный шаг и первым: без него отсутствующий секрет превращался бы
       # в «Permission denied (publickey)» или в попытку сходить на пустое
       # имя — то есть в отказ, который указывает не на причину. Секреты
-      # environment production заводит владелец (ADR 2026-10-03-0353,
-      # «Ручные шаги», п. 3), и до этого момента выкатка обязана говорить,
-      # чего именно нет.
+      # репозитория заводит владелец (ADR 2026-10-05-1643, «Ручные шаги»,
+      # п. 1), и до этого момента выкатка обязана говорить, чего именно нет.
+      #
+      # До 2026-10-05 это были секреты environment `production`. Они не
+      # переживают перевод репозитория в приватный на тарифе Free: «If you
+      # convert a repository from public to private, any configured
+      # protection rules or environment secrets will be ignored»
+      # (docs.github.com, Managing environments for deployment).
       - name: Секреты выкатки заведены
         env:
           SSH_KEY: ${{ secrets.SSH_KEY }}
@@ -44,7 +71,7 @@ jobs:
           [ -n "$SSH_HOST" ] || missing="$missing SSH_HOST"
           [ -n "$SSH_USER" ] || missing="$missing SSH_USER"
           if [ -n "$missing" ]; then
-            echo "::error::в environment production нет секретов:$missing — их заводит владелец (ADR 2026-10-03-0353, «Ручные шаги», п. 3); SSH_PORT необязателен, по умолчанию 22"
+            echo "::error::в секретах репозитория нет:$missing — их заводит владелец (ADR 2026-10-05-1643, «Ручные шаги», п. 1); SSH_PORT необязателен, по умолчанию 22"
             exit 1
           fi
           echo "ok: SSH_KEY, SSH_HOST и SSH_USER на месте"

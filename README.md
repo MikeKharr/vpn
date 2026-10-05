@@ -9,8 +9,9 @@ Happ на Mac и iPhone.
 перенос рабочего входа на второй адрес —
 [ADR 2026-10-05-1546](agent_docs/adr/2026-10-05-1546-second-ip-xray-direct-happ-back.md).
 
-Репозиторий публичный: ключи, UUID, shortId, ссылки `vless://` и QR сюда
-не попадают никогда.
+Репозиторий приватный (ADR [2026-10-05-1643](agent_docs/adr/2026-10-05-1643-private-repo-repository-secrets.md)):
+ключи, UUID, shortId, ссылки `vless://` и QR сюда не попадают никогда — от
+видимости это правило не зависит, приватность обратима, а коммит нет.
 
 ## Что в репозитории
 
@@ -33,9 +34,12 @@ Happ на Mac и iPhone.
 Полный список шагов владельца — ADR, раздел «Ручные шаги и проверки».
 Коротко и по порядку:
 
-1. Секреты выкатки `SSH_KEY`, `SSH_HOST`, `SSH_USER` в environment
-   `production` этого репозитория; публичный ключ — в `authorized_keys` на
-   сервере.
+1. Секреты выкатки `SSH_KEY`, `SSH_HOST`, `SSH_USER` — **секреты уровня
+   репозитория** (`gh secret set <ИМЯ> -R MikeKharr/vpn`, команды целиком —
+   ADR [2026-10-05-1643](agent_docs/adr/2026-10-05-1643-private-repo-repository-secrets.md),
+   «Ручные шаги», п. 1); публичный ключ — в `authorized_keys` на сервере.
+   Не environment: его секреты игнорируются в приватном репозитории на
+   тарифе Free.
 2. В своём терминале: `docker run --rm ghcr.io/xtls/xray-core:26.9.30 x25519`,
    `uuidgen` дважды, `openssl rand -hex 4` дважды. Сохранить в менеджере
    паролей, никуда не вставлять.
