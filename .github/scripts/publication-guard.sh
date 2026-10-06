@@ -25,7 +25,10 @@ set -euo pipefail
 
 host="${1:-}"
 json_file="${2:-}"
-[ -n "$host" ] && [ -n "$json_file" ] || { echo "::error::нужны два аргумента: <хост> <файл с выводом docker compose config --format json>"; exit 2; }
+if [ -z "$host" ] || [ -z "$json_file" ]; then
+  echo "::error::нужны два аргумента: <хост> <файл с выводом docker compose config --format json>"
+  exit 2
+fi
 [ -s "$json_file" ] || { echo "::error::файл $json_file пуст или не существует — разбор compose не состоялся"; exit 2; }
 
 # Ожидания по хостам. Строка публикации — «служба адрес снаружи внутри

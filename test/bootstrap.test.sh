@@ -105,7 +105,12 @@ else
     bad 'мутация собирается' 'замена скобок группы не нашла ни одной строки — мутация ничего не изменила'
   fi
 
+  # SC2002: «лишний cat» здесь — ПРЕДМЕТ проверки, а не небрежность. Через
+  # `bash -s < файл` stdin перемещаемый, bash сам возвращает позицию, и отказ
+  # не воспроизводится вовсе; нужен именно КОНВЕЙЕР, как у ssh.
+  # shellcheck disable=SC2002
   got_with=$(cat "$work/with-group.sh" | bash -s -- ops 2>&1 || true)
+  # shellcheck disable=SC2002
   got_without=$(cat "$work/no-group.sh" | bash -s -- ops 2>&1 || true)
 
   if printf '%s' "$got_with" | grep -qF MARKER_REACHED; then

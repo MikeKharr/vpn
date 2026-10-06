@@ -357,7 +357,7 @@ report=$(
     echo "   ТРЕБУЕТСЯ: обновилось ядро или системная библиотека. Перезагрузка —"
     echo "   решение владельца и его руки: контейнеров на машине ещё нет, то есть"
     echo "   сейчас она ничего не стоит, а после выкатки будет стоить простоя VPN."
-    cat /var/run/reboot-required.pkgs 2>/dev/null | sed 's/^/     /' || true
+    sed 's/^/     /' /var/run/reboot-required.pkgs 2>/dev/null || true
   else
     echo "   не требуется"
   fi
