@@ -139,6 +139,11 @@
   адрес одного хоста не попадают в ссылку другого.
 - `bash test/bootstrap.test.sh` — приманки `deploy/bootstrap.sh`: разбор
   аргументов и целость тела скрипта при запуске со stdin.
+- `bash test/make-happ-json.test.sh` — сборка клиентского конфига Happ:
+  права, запрет перезаписи ключа th2, отсутствие значений в аргументах
+  процессов, полное равенство структуры ожидаемой. `xray run -test` внутри —
+  из PATH, иначе образом Xray из
+  `deploy/compose.yml`, иначе пропуск с названной причиной.
 - `actionlint` и `shellcheck $(git ls-files '*.sh')`.
 - `xray run -test` на отрендеренном шаблоне и `caddy adapt` на Caddyfile
   маски th2 — только в CI (нужен Docker); `xray run -test` гоняется по
