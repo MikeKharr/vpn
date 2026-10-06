@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+# Первичная настройка свежей машины под ВТОРОЙ сервер VPN (th2, Triplify).
+# Решение — ADR 2026-10-05-2223, п. 1; разовое разрешение агенту запустить его
+# самому — ADR 2026-10-06-1054 (ответ владельца: «Разово разрешаю агенту»).
+# Идемпотентен и неинтерактивен: повторный запуск ничего не ломает и ничего не
+# переспрашивает.
+#
+#   ssh triplify 'bash -s -- ops' < deploy/bootstrap.sh
+#   # проверить вход новым пользователем СО СВОЕЙ машины, и только потом:
+#   ssh triplify 'bash -s -- ops --disable-root-login' < deploy/bootstrap.sh
+#
+# ЗАПУСК СО STDIN БЕЗОПАСЕН ЗДЕСЬ, и это не «на авось». Классический отказ
+# такого запуска — apt на conffile-вопросе читает stdin и съедает остаток
+# скрипта (урок адвента 2026-09-07, development-history): бóльшая часть файла
+# тогда просто не исполняется, а прогон выглядит успешным. Закрыто это не
+# обещанием, а формой файла: ВСЁ тело завёрнуто в группу `{ … } </dev/null`
+# (ниже).
+#
+# Держит это САМА ГРУППА, и держит честно: bash разбирает составную команду
+# ЦЕЛИКОМ, прежде чем исполнить хоть одну команду внутри, то есть дочитывает
+# скрипт до закрывающей скобки. Дальше читать нечего, и украсть у команды
+# внутри нечего. Приманка «stdin не съедается» в test/bootstrap.test.sh кормит
+# скрипт КОНВЕЙЕРОМ (как ssh) и краснеет на снятии группы.
+#
+# `</dev/null` у группы — ВТОРОЙ держатель того же, и он слабее: при запуске
+# из файла (stdin перемещаемый) bash и так возвращает позицию, поэтому снятие
+# одного этого перенаправления приманку не краснит. Оно стоит затем, чтобы
+# пустой stdin у команд внутри не зависел от того, как bash читает ввод в
+# конкретной сборке.
+#
+# ДВЕ ФАЗЫ, и это защита от потери машины. Первый запуск делает ВСЁ, кроме запрета root-логина: пользователь выкатки,
+# ключи, файрвол, fail2ban, автообновления, Docker, каталог ~/vpn/deploy.
+# Запрет root-логина — отдельный запуск с `--disable-root-login`, и делается
+# он ТОЛЬКО после того, как вход новым пользователем проверен с другой машины.
+# Иначе единственная ошибка в authorized_keys оставляет машину без входа
+# вовсе, а консоль провайдера — единственным путём назад.
+#
+# Что делает: пользователь выкатки без root, жёсткий SSH (только ключи),
+# файрвол, fail2ban, автообновления безопасности, Docker CE, ~/vpn/deploy.
+#
+# ЧЕГО НЕ ДЕЛАЕТ, и это не пропуск:
+#   - не клонирует репозиторий: git-клона на сервере нет и не будет, файлы
+#     везёт rsync из GitHub Actions (ADR 2026-10-03-0353);
+#   - не создаёт сеть `edge`: её на этом хосте нет вовсе, маска живёт в самом
+#     проекте (deploy/hosts/th2/compose.yml);
+#   - НЕ КАСАЕТСЯ СЕКРЕТОВ: ни ключа REALITY, ни UUID, ни shortId, ни ключа
+#     выкатки. secrets.env кладёт отдельно владелец (deploy/put-secrets.sh),
+#     ключ выкатки он же заводит в GitHub (ADR, «Ручные шаги», п. 4-5);
+#   - не трогает DNS и не поднимает контейнеры: первый запуск проекта — это
+#     выкатка по push в main.
+#
+# ОТЧЁТ В КОНЦЕ заменяет имя пользователя выкатки заглушкой. Польза от этого
+# с 2026-10-06 невелика и названа прямо: имя `ops` стоит в команде запуска в
+# описании PR публичного репозитория (ADR 2026-10-06-1054), то есть
+# необнаружимым оно уже не является. Держат sshd ключи-only, fail2ban и ufw, а
+# не неизвестность имени; замена в отчёте остаётся, чтобы в журналах прогонов
+# оно хотя бы не множилось.
+
+set -euo pipefail
+
+# Всё тело — в группе с ПУСТЫМ stdin. Причина и то, что без неё ломается, —
+# в шапке; закрывающая скобка с перенаправлением стоит в самом конце файла.
+{
+
+log() { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
+die() { printf '\n\033[1;31mОСТАНОВ:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --- аргументы ----------------------------------------------------------------
+# Разбор аргументов идёт ДО проверки на root, и это не косметика: так форму
+# имени и второго аргумента можно проверить приманками на своей машине
+# (test/bootstrap.test.sh), не имея сервера. При проверке на root первой
+# строкой любой запуск не от root давал бы один и тот же отказ, то есть
+# приманки не различали бы «имя отвергнуто» от «я не root».
+# Имя пользователя выкатки — АРГУМЕНТ, умолчания нет (ADR 2026-10-05-2223,
+# «Решения владельцу», п. 7): имя выбирает владелец. Выбрано `ops`
+# (2026-10-06). Умолчания в САМОМ ФАЙЛЕ по-прежнему нет: умолчание получал бы
+# и тот, кто запустит скрипт на третьей машине, не подумав, какое имя там
+# нужно. Переменная APP_USER принимается как второй путь — так его задаёт
+# форма из ADR.
+APP_USER="${1:-${APP_USER:-}}"
+MODE=full
+case "${2:-}" in
+  '') ;;
+  --disable-root-login) MODE=root-off ;;
+  *) die "второй аргумент может быть только --disable-root-login, а не «${2}»" ;;
+esac
+
+if [ -z "$APP_USER" ]; then
+  die "не задано имя пользователя выкатки. Умолчания нет: имя выбирает владелец.
+  Запуск:  ssh triplify 'bash -s -- <имя>' < deploy/bootstrap.sh"
+fi
+case "$APP_USER" in
+  root|ubuntu|admin|debian|user|advent|vpn|xray|caddy|deploy)
+    die "имя «${APP_USER}» занято умолчаниями или угадывается с первой попытки — выберите другое (ADR 2026-10-05-2223, п. 1)" ;;
+esac
+printf '%s' "$APP_USER" | grep -Eq '^[a-z][a-z0-9_-]{2,31}$' \
+  || die "имя пользователя не той формы: ожидается 3-32 знака, начиная со строчной латинской буквы, далее a-z0-9_-"
+
+[ "$(id -u)" -eq 0 ] || die "запускать от root"
+
+APP_HOME="/home/${APP_USER}"
+DEPLOY_DIR="${APP_HOME}/vpn/deploy"
+
+# --- общие помощники для sshd -------------------------------------------------
+HARDENING=/etc/ssh/sshd_config.d/99-vpn-hardening.conf
+ROOTOFF=/etc/ssh/sshd_config.d/99-vpn-root-off.conf
+
+# Перезапуск с проверкой синтаксиса ДО него: `sshd -t` на негодном файле даёт
+# ненулевой код, и машина не остаётся без sshd.
+reload_sshd() {
+  sshd -t || die "sshd отверг конфигурацию — изменения не применены, вход не тронут"
+  systemctl restart ssh
+  # В Ubuntu 24.04 sshd активируется через сокет: живая настройка приходит
+  # только к НОВЫМ соединениям, и перезапуск сокета обязателен.
+  if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+    systemctl restart ssh.socket
+  fi
+}
+
+# Проверка ДЕЙСТВУЮЩЕГО значения, а не записанного в наш файл. Это не
+# перестраховка: каталог sshd_config.d читается в лексическом порядке, и в силе
+# остаётся ПЕРВОЕ встреченное значение, поэтому файл `00-hardening.conf`
+# владельца (положен им 2026-10-06) перекрывает наш `99-…`. Без этой проверки
+# скрипт печатал бы «готово», а в силе оставалось бы чужое значение.
+assert_effective() {
+  local name="$1" want="$2" got
+  got=$(sshd -T 2>/dev/null | awk -v n="$name" 'tolower($1)==n {print $2; exit}')
+  if [ "$got" != "$want" ]; then
+    echo "   кто задаёт ${name}:" >&2
+    grep -rniE "^[[:space:]]*${name}" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | sed 's/^/     /' >&2
+    die "действующее ${name} = «${got}», а требуется «${want}». Каталог sshd_config.d читается по порядку имён, и в силе остаётся ПЕРВОЕ значение — значит его задаёт один из файлов выше, а не ${HARDENING}. Поправить тот файл."
+  fi
+}
+
+# --- фаза 2: закрытие входа для root ------------------------------------------
+# Отдельным запуском и только после проверки входа новым пользователем с другой
+# машины. Здесь уже
+# ничего не ставится и не обновляется: одна правка sshd и её проверка.
+if [ "$MODE" = root-off ]; then
+  id -u "$APP_USER" >/dev/null 2>&1 || die "пользователя выкатки нет — сначала первый запуск без --disable-root-login"
+  [ -s "/home/${APP_USER}/.ssh/authorized_keys" ] \
+    || die "у пользователя выкатки пустой authorized_keys — закрытие входа для root отрезало бы доступ к машине совсем"
+
+  log "Вход для root закрывается"
+  # Чужие строки того же ключевого слова глушатся, иначе наша не вступит в
+  # силу: в силе остаётся первое значение по порядку имён файлов, а
+  # `00-hardening.conf` идёт раньше. Копия файла сохраняется рядом — правка
+  # обратима.
+  for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$ROOTOFF" ] && continue
+    if grep -qiE '^[[:space:]]*PermitRootLogin' "$f"; then
+      [ -f "${f}.vpn-bak" ] || cp -p "$f" "${f}.vpn-bak"
+      sed -i -E 's/^([[:space:]]*PermitRootLogin)/# заглушено deploy\/bootstrap.sh --disable-root-login: \1/I' "$f"
+      echo "   заглушено в $f (копия: ${f}.vpn-bak)"
+    fi
+  done
+  printf 'PermitRootLogin no\n' > "$ROOTOFF"
+  reload_sshd
+  assert_effective permitrootlogin no
+
+  echo
+  echo "── sshd, ДЕЙСТВУЮЩАЯ конфигурация"
+  sshd -T | grep -iE '^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication) ' | sed 's/^/   /'
+  cat <<'EOF'
+
+Готово. Проверка, которая различает «закрыт» и «на вид закрыт», — со своей
+машины, НЕ из этой сессии:
+
+  ssh -o BatchMode=yes root@<IP> true
+
+Ждём «Permission denied (publickey)». Приглашение пароля или успешный вход
+означают, что действует другой файл конфигурации — тогда смотреть вывод выше.
+EOF
+  exit 0
+fi
+
+# --- система ------------------------------------------------------------------
+# shellcheck disable=SC1091  # файл системный, его не разобрать статически
+. /etc/os-release
+case "${ID:-}" in
+  ubuntu) ;;
+  *) die "этот скрипт написан под Ubuntu, а здесь ID=${ID:-неизвестно}. Пакеты, репозиторий Docker и имена служб различаются — ставить вручную по образцу выше, а не правя скрипт на живой машине." ;;
+esac
+
+# Защита от того же класса ошибок, что и запуск файлом: apt никогда не должен
+# читать stdin, а conffile-вопросы решаются без участия человека — остаётся
+# текущий файл.
+APT_OPTS=(-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+
+log "Обновление пакетов (Ubuntu ${VERSION_ID:-?})"
+apt-get update -qq </dev/null
+apt-get upgrade -y -qq "${APT_OPTS[@]}" </dev/null
+
+log "Пакеты: ufw, fail2ban, автообновления, ca-certificates"
+# Без git: клона на сервере нет. iproute2 и curl нужны отчёту и репозиторию
+# Docker.
+apt-get install -y -qq "${APT_OPTS[@]}" </dev/null \
+  ufw fail2ban unattended-upgrades ca-certificates curl gnupg iproute2
+
+log "Пользователь выкатки"
+if ! id -u "$APP_USER" >/dev/null 2>&1; then
+  adduser --disabled-password --gecos "" "$APP_USER" </dev/null
+  usermod -aG sudo "$APP_USER"
+fi
+# Перенос authorized_keys от root — иначе после запрета root-логина вход
+# потерялся бы. КОПИЯ, а не перемещение: пока root-логин ещё разрешён, рабочий
+# вход не должен исчезнуть посередине скрипта.
+install -d -m 700 -o "$APP_USER" -g "$APP_USER" "${APP_HOME}/.ssh"
+touch "${APP_HOME}/.ssh/authorized_keys"
+chown "$APP_USER:$APP_USER" "${APP_HOME}/.ssh/authorized_keys"
+chmod 600 "${APP_HOME}/.ssh/authorized_keys"
+# Докладываются ОТСУТСТВУЮЩИЕ ключи, а не копируется файл «если пусто».
+# Разница видна на повторном запуске: владелец добавил ключ к root, запустил
+# скрипт заново — и с прежней формой («копировать, только если у нового
+# пользователя пусто») новый ключ не доехал бы, а скрипт сказал бы «готово».
+# Сверка идёт по ТЕЛУ ключа (второе поле), а не по строке целиком: тот же ключ
+# с другим комментарием — тот же ключ, и дубль строки не нужен.
+if [ -f /root/.ssh/authorized_keys ]; then
+  added=0
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    body=$(printf '%s' "$line" | awk '{print $2}')
+    [ -n "$body" ] || continue
+    if ! grep -qF -- "$body" "${APP_HOME}/.ssh/authorized_keys"; then
+      printf '%s\n' "$line" >> "${APP_HOME}/.ssh/authorized_keys"
+      added=$((added + 1))
+    fi
+  done < /root/.ssh/authorized_keys
+  printf '   ключей от root докопировано: %s, всего у пользователя выкатки: %s\n' \
+    "$added" "$(grep -cvE '^[[:space:]]*(#|$)' "${APP_HOME}/.ssh/authorized_keys" || true)"
+fi
+# Ключ ВЫКАТКИ (публичная половина) — необязателен здесь: владелец заводит его
+# после bootstrap (ADR, «Ручные шаги», п. 4). Если он уже есть — дописывается
+# идемпотентно, без дубля строки. Приватной половины скрипт не видит никогда.
+if [ -n "${DEPLOY_PUBKEY:-}" ]; then
+  printf '%s' "$DEPLOY_PUBKEY" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) [A-Za-z0-9+/=]+( .*)?$' \
+    || die "DEPLOY_PUBKEY не похож на публичный ключ ssh (строка из *.pub)"
+  key_body=$(printf '%s' "$DEPLOY_PUBKEY" | awk '{print $2}')
+  grep -qF -- "$key_body" "${APP_HOME}/.ssh/authorized_keys" \
+    || printf '%s\n' "$DEPLOY_PUBKEY" >> "${APP_HOME}/.ssh/authorized_keys"
+fi
+[ -s "${APP_HOME}/.ssh/authorized_keys" ] || die "у пользователя выкатки нет authorized_keys. Запрет root-логина отрезал бы доступ к машине совсем.
+  Добавьте свой публичный ключ в /root/.ssh/authorized_keys и запустите скрипт заново."
+
+log "Жёсткий SSH: только ключи"
+# Строки PermitRootLogin здесь НЕТ намеренно — это фаза 2
+# (`--disable-root-login`). Закрыть вход для root в том же запуске, что создаёт
+# пользователя, означает: ошибка в authorized_keys → машина без входа вовсе, и
+# путь назад только через консоль провайдера.
+cat > "$HARDENING" <<'EOF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+X11Forwarding no
+MaxAuthTries 3
+EOF
+reload_sshd
+# Вход по паролю обязан быть закрыт ДЕЙСТВУЮЩЕЙ конфигурацией, а не нашим
+# файлом: см. assert_effective выше. Владелец уже положил
+# /etc/ssh/sshd_config.d/00-hardening.conf с теми же двумя значениями, поэтому
+# здесь они совпадают и конфликта нет — но это проверено, а не принято на веру.
+assert_effective passwordauthentication no
+assert_effective kbdinteractiveauthentication no
+assert_effective pubkeyauthentication yes
+
+log "Файрвол: 22, 80, 443 и больше ничего"
+# `--force reset` намеренно: скрипт идемпотентен, и набор правил после него
+# обязан быть ИЗВЕСТНЫМ, а не «прежний плюс эти». На машине, купленной с
+# шаблоном провайдера, прежние правила могли разрешать что угодно — например,
+# 3389, который на этом адресе отвечал снаружи до bootstrap.
+ufw --force reset >/dev/null
+ufw default deny incoming >/dev/null
+ufw default allow outgoing >/dev/null
+ufw allow 22/tcp >/dev/null
+ufw allow 80/tcp >/dev/null
+ufw allow 443/tcp >/dev/null
+ufw --force enable
+
+log "fail2ban на SSH"
+# backend = systemd задан ЯВНО: в Ubuntu 24.04 /var/log/auth.log не ведётся,
+# журнал только в journald, и jail с файловым backend'ом поднимался бы в
+# отказ — то есть «fail2ban установлен» было бы правдой, а «fail2ban банит» —
+# нет. Различает это проверка «статус jail sshd» в отчёте.
+cat > /etc/fail2ban/jail.local <<'EOF'
+[sshd]
+enabled = true
+backend = systemd
+maxretry = 5
+bantime = 1h
+findtime = 10m
+EOF
+systemctl enable --now fail2ban
+systemctl restart fail2ban
+
+log "Автообновления безопасности"
+dpkg-reconfigure -f noninteractive unattended-upgrades </dev/null
+
+log "Docker CE"
+if ! command -v docker >/dev/null 2>&1; then
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq </dev/null
+  apt-get install -y -qq "${APT_OPTS[@]}" </dev/null \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
+usermod -aG docker "$APP_USER"
+systemctl enable --now docker
+
+log "Каталог выкатки"
+# Сюда rsync из GitHub Actions везёт содержимое deploy/, и рядом с ним
+# владелец кладёт secrets.env. Права 700: читать каталог с секретами больше
+# некому.
+install -d -m 700 -o "$APP_USER" -g "$APP_USER" "${APP_HOME}/vpn"
+install -d -m 700 -o "$APP_USER" -g "$APP_USER" "$DEPLOY_DIR"
+
+# --- отчёт --------------------------------------------------------------------
+# Печатается только то, что РАЗЛИЧАЕТ «сделано» и «не сделано». «Готово» без
+# этих строк — это рассказ скрипта о себе.
+#
+# Отчёт собирается в переменную и выводится через sed, который заменяет имя
+# пользователя выкатки на заглушку: отчёт должен быть пригоден для показа
+# агенту, а имя — секрет SSH_USER. Форма имени проверена выше, метазнаков sed
+# в нём быть не может.
+report=$(
+  echo "── sshd, ДЕЙСТВУЮЩАЯ конфигурация (не файл: «sshd -T» печатает то, что в силе)"
+  sshd -T | grep -iE '^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication) ' | sed 's/^/   /'
+
+  echo "── ufw (ждём: deny (incoming), и ровно 22, 80, 443/tcp)"
+  ufw status verbose | sed 's/^/   /'
+
+  echo "── службы"
+  printf '   fail2ban: %s\n' "$(systemctl is-active fail2ban 2>&1)"
+  printf '   docker:   %s\n' "$(systemctl is-active docker 2>&1)"
+  printf '   автообновления: %s, Unattended-Upgrade=%s\n' \
+    "$(systemctl is-enabled unattended-upgrades.service 2>&1)" \
+    "$(apt-config dump 2>/dev/null | awk -F'"' '/^APT::Periodic::Unattended-Upgrade /{print $2}')"
+
+  echo "── jail sshd (установлен ≠ банит: при негодном backend'е jail не поднимается)"
+  fail2ban-client status sshd 2>&1 | sed 's/^/   /'
+
+  echo "── docker"
+  printf '   %s\n' "$(docker --version 2>&1)"
+  printf '   %s\n' "$(docker compose version 2>&1 | head -1)"
+
+  echo "── каталог выкатки ~/vpn/deploy (владелец и права)"
+  stat -c '   %A %U:%G %n' "$DEPLOY_DIR"
+
+  echo "── перезагрузка"
+  if [ -f /var/run/reboot-required ]; then
+    echo "   ТРЕБУЕТСЯ: обновилось ядро или системная библиотека. Перезагрузка —"
+    echo "   решение владельца и его руки: контейнеров на машине ещё нет, то есть"
+    echo "   сейчас она ничего не стоит, а после выкатки будет стоить простоя VPN."
+    sed 's/^/     /' /var/run/reboot-required.pkgs 2>/dev/null || true
+  else
+    echo "   не требуется"
+  fi
+
+  echo "── адреса машины"
+  ip -4 -o addr show scope global | awk '{printf "   IPv4 %s %s\n", $2, $4}'
+  v6=$(ip -6 -o addr show scope global | awk '{printf "   IPv6 %s %s\n", $2, $4}')
+  if [ -n "$v6" ]; then
+    printf '%s\n' "$v6"
+    echo "   IPv6 на хосте есть и НЕ используется: публикации — литералы IPv4,"
+    echo "   сеть проекта с enable_ipv6: false (ADR 2026-10-05-2223, «IPv6»)."
+  else
+    echo "   IPv6 на хосте не выдан"
+  fi
+
+  echo "── кто слушает TCP (ждём 22, и больше ничего снаружи)"
+  ss -Hltn | awk '{print $4}' | sed 's/^/   /' | sort -u
+  extra=$(ss -Hltn | awk '{print $4}' \
+    | grep -vE '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\])' \
+    | awk -F: '{print $NF}' | sort -u | grep -vE '^(22|80|443)$' || true)
+  if [ -n "$extra" ]; then
+    echo "   ВНИМАНИЕ: на внешних адресах слушают ещё порты: $(printf '%s' "$extra" | tr '\n' ' ')"
+    echo "   Снаружи их закрыл ufw (deny incoming выше), то есть доступа к ним нет."
+    echo "   Но служба жива. Так выглядит, например, 3389 из шаблона провайдера,"
+    echo "   который на этом адресе отвечал ДО bootstrap. Чтобы её не было вовсе:"
+    echo "     ss -ltnp | grep <порт>     # чей это процесс"
+    echo "     systemctl disable --now <служба>"
+  else
+    echo "   посторонних слушателей на внешних адресах нет"
+  fi
+
+  echo "── чего этот скрипт НЕ закрывает"
+  echo "   ufw не стоит на пути портов, которые публикует Docker: публикация идёт"
+  echo "   цепочкой DOCKER, а не INPUT (ADR zpq-ai 2026-09-24-0855). Что наружу"
+  echo "   отдаёт сам проект, держит шаг CI «Наложение хоста держит публикацию,"
+  echo "   сети и контракт», а не файрвол. Сейчас Docker не публикует ничего:"
+  printf '   запущенных контейнеров сейчас: %s\n' "$(docker ps -q | wc -l | tr -d ' ')"
+)
+printf '%s\n' "$report" | sed "s/${APP_USER}/<пользователь выкатки>/g"
+
+cat <<'EOF'
+
+────────────────────────────────────────────────────────
+ФАЗА 1 ЗАКОНЧЕНА. Вход для root ещё РАЗРЕШЁН — намеренно.
+
+Следующее действие — проверить вход новым пользователем СО СВОЕЙ МАШИНЫ, не
+закрывая эту сессию. Если что-то не так, root остаётся путём назад:
+
+  ssh -o BatchMode=yes <пользователь>@<IP> 'id; sudo -n true || echo "sudo попросит пароль — это норма"'
+
+Получилось — закрыть вход для root вторым запуском:
+
+  ssh triplify 'bash -s -- <пользователь> --disable-root-login' < deploy/bootstrap.sh
+
+Не получилось — ничего не закрывать и разбираться: смотреть
+/home/<пользователь>/.ssh/authorized_keys и права 700/600 на каталог и файл.
+
+Дальше — по ADR 2026-10-05-2223, «Ручные шаги», с правками ADR 2026-10-06-1054:
+
+  шаг 3  отпечаток ключа хоста: сверить на сервере и с Mac, передать агенту
+         строку ssh-keyscan (публичный ключ, не секрет);
+  шаг 4  ключ выкатки и секреты environment production-th2 в GitHub —
+         ВЛАДЕЛЕЦ, это новые секреты;
+  шаг 5  секреты VPN — ВЛАДЕЛЕЦ: SERVER=<пользователь>@<IP> bash
+         deploy/put-secrets.sh. Пара x25519 для th2 УЖЕ СУЩЕСТВУЕТ и новая
+         НЕ генерируется: приватная половина — ~/.config/vpn/th2-reality.key
+         на Mac владельца, публичная уже уехала в импортированный профиль
+         Happ (ADR 2026-10-06-1054). UUID и shortId — те же, что на th1;
+  шаг 6  PR с матрицей выкатки — он и поднимет контейнеры.
+
+Контейнеры здесь руками не поднимаются: выкатка привязана к коммиту и идёт
+через GitHub Actions (AGENTS.md, граница 3).
+────────────────────────────────────────────────────────
+EOF
+
+# Закрывающая скобка группы из начала файла. `</dev/null` — то, из-за чего
+# запуск `ssh … 'bash -s -- <имя>' < deploy/bootstrap.sh` безопасен: stdin
+# каждой команды внутри группы пуст, и до текста скрипта не дотянется ни apt,
+# ни что-либо ещё. Приманка — test/bootstrap.test.sh, «stdin не съедается».
+} </dev/null

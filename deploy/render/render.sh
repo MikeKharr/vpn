@@ -23,7 +23,7 @@ umask 077
 TEMPLATE="${TEMPLATE:-/template/config.json}"
 OUT="${OUT:-/conf/config.json}"
 
-VARS='REALITY_PRIVATE_KEY UUID_MAC UUID_IPHONE SHORTID_MAC SHORTID_IPHONE XRAY_TARGET'
+VARS='REALITY_PRIVATE_KEY UUID_MAC UUID_IPHONE SHORTID_MAC SHORTID_IPHONE XRAY_TARGET MASK_NAME'
 
 die() { echo "render: $1" >&2; exit "$2"; }
 
@@ -33,7 +33,7 @@ for name in $VARS; do
   [ -n "$value" ] || missing="$missing $name"
 done
 if [ -n "$missing" ]; then
-  die "в окружении нет значений:$missing — секреты кладёт deploy/put-secrets.sh, XRAY_TARGET задан в environment службы render в deploy/compose.yml" 2
+  die "в окружении нет значений:$missing — секреты кладёт deploy/put-secrets.sh, XRAY_TARGET и MASK_NAME заданы в environment службы render в deploy/hosts/<хост>/compose.yml; без наложения хоста их нет вовсе" 2
 fi
 
 # Форма каждого значения проверяется здесь, а не у Xray: `xray run -test`
@@ -48,9 +48,17 @@ check UUID_MAC '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a
 check UUID_IPHONE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' 'UUID — вывод uuidgen'
 check SHORTID_MAC '^[0-9a-f]{8}$' '8 знаков hex в нижнем регистре — вывод openssl rand -hex 4'
 check SHORTID_IPHONE '^[0-9a-f]{8}$' '8 знаков hex в нижнем регистре — вывод openssl rand -hex 4'
-# XRAY_TARGET приходит не из secrets.env, а из environment службы render в
-# deploy/compose.yml: это не секрет, и там его держит шаг CI.
-check XRAY_TARGET '^[A-Za-z0-9._-]+:[0-9]{1,5}$' 'хост:порт внутреннего слушателя Caddy zpq-ai с одной только маской — значение задано в deploy/compose.yml, а не в secrets.env'
+# XRAY_TARGET и MASK_NAME приходят не из secrets.env, а из environment службы
+# render в deploy/hosts/<хост>/compose.yml: это не секреты, и там их держит шаг
+# CI по каждому наложению.
+check XRAY_TARGET '^[A-Za-z0-9._-]+:[0-9]{1,5}$' 'хост:порт внутреннего слушателя Caddy с одной только страницей маски — значение задано в deploy/hosts/<хост>/compose.yml, а не в secrets.env'
+# MASK_NAME — имя маски в serverNames REALITY. Форма — имя хоста, не пустая
+# строка и не «что угодно»: пустое значение здесь дало бы serverNames: [""],
+# то есть конфиг, который `xray run -test` ПРИМЕТ, а ни одно устройство не
+# подключит; значение с пробелом или кавычкой сломало бы JSON молча, уже
+# после подстановки. Хотя бы одна точка обязательна: имя маски — доменное
+# имя с сертификатом, а не `localhost` и не адрес.
+check MASK_NAME '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$' 'имя хоста маски вида cdn2.zpq.ai — значение задано в deploy/hosts/<хост>/compose.yml, а не в secrets.env'
 
 [ "$SHORTID_MAC" != "$SHORTID_IPHONE" ] || die 'SHORTID_MAC и SHORTID_IPHONE совпадают — отзыв одного устройства отозвал бы оба' 3
 [ "$UUID_MAC" != "$UUID_IPHONE" ] || die 'UUID_MAC и UUID_IPHONE совпадают — отзыв одного устройства отозвал бы оба' 3

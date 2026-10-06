@@ -18,6 +18,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
+    env:
+      # Хост выкатки. Один, и это НАМЕРЕННО: наложения обоих хостов приехали
+      # PR A-1, а матрица из двух хостов — PR A-2 (ADR 2026-10-05-2223,
+      # «Ручные шаги», п. 1 и 6). Мерж A-1 с матрицей покатил бы на th2, где
+      # ещё нет ни secrets.env, ни секретов environment — то есть выкатка
+      # упала бы, а не поднялась.
+      #
+      # Переменная, а не литерал в трёх местах: в A-2 она становится
+      # `${{ matrix.host }}`, и больше в этом файле менять нечего.
+      HOST: th1
     steps:
       # Нужен каталог deploy: его содержимое и уезжает на сервер, в нём же
       # лежит закреплённый ключ хоста. Токен на диске не сохраняется.
@@ -110,11 +120,27 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
+          # Имя хоста едет АРГУМЕНТОМ (`bash -s -- th1`), а не подстановкой в
+          # текст: heredoc стоит в кавычках ('REMOTE'), и ни одна строка внутри
+          # не раскрывается на раннере. Так же на сервер ничего не попадает в
+          # командную строку ssh, кроме имени хоста — а оно не секрет.
           ssh -p "$SSH_PORT" \
               -o StrictHostKeyChecking=yes \
-              "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+              "$SSH_USER@$SSH_HOST" "bash -s -- $HOST" <<'REMOTE'
           set -euo pipefail
           cd ~/vpn/deploy
+
+          # Наложение хоста ОБЯЗАТЕЛЬНО: с ADR 2026-10-05-2223 общий
+          # compose.yml сам не запускается — в нём нет ни публикации портов, ни
+          # сетей, ни XRAY_TARGET, ни MASK_NAME. Без `-f hosts/$HOST/compose.yml`
+          # выкатка сняла бы у Xray опубликованный порт и уронила вход, а
+          # render отказался бы с кодом 2.
+          HOST="${1:?не передано имя хоста}"
+          if [ ! -f "hosts/$HOST/compose.yml" ]; then
+            echo "::error::на сервере нет hosts/$HOST/compose.yml — наложение не приехало rsync'ом, а без него общий compose.yml не запускается (ADR 2026-10-05-2223, п. 2)"
+            exit 1
+          fi
+          compose=(docker compose -f compose.yml -f "hosts/$HOST/compose.yml")
 
           if [ ! -f secrets.env ]; then
             echo "::error::на сервере нет vpn/deploy/secrets.env — его кладёт владелец скриптом deploy/put-secrets.sh; единица render стоит required: true и без файла проект не разберётся"
@@ -147,7 +173,7 @@ jobs:
           # места для той же ошибки. Цена названа прямо: VPN рвётся на секунды
           # при каждой выкатке — для личного VPN на два устройства это дешевле,
           # чем тихо не применённый отзыв устройства.
-          docker compose up -d --force-recreate --remove-orphans
+          "${compose[@]}" up -d --force-recreate --remove-orphans
           docker image prune -f --filter "until=168h" || true
 
           echo "==> ожидание render: healthy"
@@ -160,7 +186,7 @@ jobs:
           if [ "$state" != healthy ]; then
             # Журнал рендера печатать можно: он сообщает ИМЕНА значений и коды
             # отказа, но не сами значения (deploy/render/render.sh).
-            docker compose logs --tail 30 render
+            "${compose[@]}" logs --tail 30 render
             echo "::error::render не стал healthy: $state — конфиг не собран, Xray не поднимется"
             exit 1
           fi
@@ -177,7 +203,7 @@ jobs:
             # репозиторий публичный, журнал обращений выключен в конфиге
             # (log.access: "none"), поэтому адресов клиентов здесь быть не
             # может, а причина отказа конфига — может.
-            docker compose logs --tail 30 xray
+            "${compose[@]}" logs --tail 30 xray
             echo "::error::контейнер xray не держится: Running=$running RestartCount=$restarts"
             exit 1
           fi
@@ -195,7 +221,7 @@ jobs:
           sh assert-recreated.sh "$id_before" "$id_after" "$render_started" "$xray_started"
 
           echo "==> состояние"
-          docker compose ps
+          "${compose[@]}" ps
           REMOTE
 
       # Живая проверка СНАРУЖИ машины, с раннера. До ADR 2026-10-05-1546 её
@@ -233,30 +259,37 @@ jobs:
           # строки ports. Файл рождается ПОСЛЕ rsync, поэтому на сервер не
           # уезжает и чужой secrets.env там не трогает.
           : > deploy/secrets.env
-          ip=$(docker compose -f deploy/compose.yml config --format json \
-                 | jq -r '.services.xray.ports[0].host_ip // ""')
-          if [ -z "$ip" ]; then
-            echo "::error::у службы xray в deploy/compose.yml нет опубликованного порта с адресом — проверять снаружи нечего; форму держит шаг ci.yml «Compose разбирается и наружу опубликован ровно один порт»"
+          # И адрес, и ИМЯ маски берутся из наложения своего хоста (ADR
+          # 2026-10-05-2223, п. 2). Имя литералом здесь больше не стоит: с
+          # двумя хостами литерал `cdn.zpq.ai` на th2 давал бы зелёный зонд к
+          # ЧУЖОМУ серверу — тот отвечает 200, и шаг не отличил бы «маска th2
+          # жива» от «жива маска th1».
+          json=$(docker compose -f deploy/compose.yml \
+                   -f "deploy/hosts/$HOST/compose.yml" config --format json)
+          ip=$(printf '%s' "$json" | jq -r '.services.xray.ports[0].host_ip // ""')
+          mask=$(printf '%s' "$json" | jq -r '.services.render.environment.MASK_NAME // ""')
+          if [ -z "$ip" ] || [ -z "$mask" ]; then
+            echo "::error::в наложении deploy/hosts/$HOST/compose.yml нет адреса публикации xray («$ip») или MASK_NAME («$mask») — проверять снаружи нечего; форму держит шаг ci.yml «Наложения хостов разбираются и держат публикации»"
             exit 1
           fi
-          echo "адрес из compose: $ip"
+          echo "из наложения $HOST: адрес $ip, маска $mask"
           # 6 попыток по 5 с, как у соседних проверок выше: контейнер только
           # что пересоздан, и слушателю нужна секунда-другая.
           code=''
           for _ in $(seq 1 6); do
             code=$(curl -sS --max-time 15 \
-                     --resolve "cdn.zpq.ai:443:$ip" \
+                     --resolve "$mask:443:$ip" \
                      -o /dev/null -w '%{http_code}' \
-                     https://cdn.zpq.ai/ || true)
+                     "https://$mask/" || true)
             echo "попытка: код $code"
             [ "$code" = 200 ] && break
             sleep 5
           done
           if [ "$code" != 200 ]; then
-            echo "::error::https://cdn.zpq.ai/ на $ip ответил «$code», а не 200. Либо Xray не слушает этот адрес (привязка не встала, адрес не поднят на хосте — проверка владельца: nc -vz -w 5 $ip 22), либо проброс REALITY в zpq:8444 не отвечает, либо сертификат маски не тот. ADR 2026-10-05-1546, «Ручные шаги», п. 1 и 3"
+            echo "::error::https://$mask/ на $ip ответил «$code», а не 200. Либо Xray не слушает этот адрес (привязка не встала, адрес не поднят на хосте — проверка владельца: nc -vz -w 5 $ip 22), либо проброс REALITY во внутренний слушатель маски не отвечает, либо сертификат маски не тот. ADR 2026-10-05-1546, «Ручные шаги», п. 1 и 3"
             exit 1
           fi
-          echo "ok: маска cdn.zpq.ai отвечает 200 на $ip, сертификат настоящий"
+          echo "ok: маска $mask отвечает 200 на $ip, сертификат настоящий"
 
       - name: Чего выкатка не доказала
         run: |

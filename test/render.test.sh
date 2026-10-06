@@ -34,7 +34,8 @@ base_env() {
     "UUID_IPHONE=$(fake_uuid)" \
     "SHORTID_MAC=$(fake_sid)" \
     "SHORTID_IPHONE=$(fake_sid)" \
-    "XRAY_TARGET=zpq:8444"
+    "XRAY_TARGET=zpq:8444" \
+    "MASK_NAME=cdn2.zpq.ai"
 }
 
 # $1 — что проверяем, $2 — ожидаемый код, $3 — ожидаемый кусок текста,
@@ -87,6 +88,16 @@ case_is 'shortId в 4 знака'     3 'SHORTID_MAC'   "$template" 'SHORTID_MAC
 case_is 'shortId в верхнем регистре' 3 'SHORTID_IPHONE' "$template" 'SHORTID_IPHONE=ABCDEF12'
 case_is 'UUID без дефисов'      3 'UUID_MAC'      "$template" 'UUID_MAC=7f3a9c1e4b2d41e89a7c0d5e6f8a1b23'
 case_is 'target без порта'      3 'XRAY_TARGET'   "$template" 'XRAY_TARGET=caddy'
+# MASK_NAME появился в ADR 2026-10-05-2223: имя маски стало плейсхолдером,
+# потому что шаблон один на два хоста. Отсутствие значения обязано быть
+# ОТКАЗОМ, а не подстановкой пустой строки: `serverNames: [""]` — конфиг,
+# который `xray run -test` ПРИМЕТ, а ни одно устройство не подключит.
+case_is 'нет MASK_NAME'         2 'MASK_NAME'     "$template" -MASK_NAME
+case_is 'MASK_NAME пустой'      2 'MASK_NAME'     "$template" 'MASK_NAME='
+case_is 'MASK_NAME без точки'   3 'MASK_NAME'     "$template" 'MASK_NAME=localhost'
+# Пробел и кавычка сломали бы JSON уже ПОСЛЕ подстановки, то есть отказом
+# ядра на сервере, а не отказом рендера.
+case_is 'MASK_NAME с пробелом'  3 'MASK_NAME'     "$template" 'MASK_NAME=cdn2 zpq.ai'
 # Значение собрано из кусков: литерал «SHORTID_MAC=<8 hex>» сам стал бы
 # находкой сторожа публичного репозитория (он ловит shortId в контексте).
 same=$(printf '%s%s' 0a0a 0a0a)
@@ -124,7 +135,10 @@ tcp = [i['streamSettings']['tcpSettings']['acceptProxyProtocol'] for i in cfg['i
 assert tcp == [True, False], tcp
 for inb in cfg['inbounds']:
     r = inb['streamSettings']['realitySettings']
-    assert r['serverNames'] == ['cdn.zpq.ai'], r['serverNames']
+    # Имя приходит из MASK_NAME (base_env выше), а не литералом из шаблона:
+    # литерал стоял здесь до ADR 2026-10-05-2223 и был бы именем ПЕРВОГО
+    # хоста на втором сервере — то есть `sni`, которого нет в serverNames.
+    assert r['serverNames'] == ['cdn2.zpq.ai'], r['serverNames']
     assert r['xver'] == 0, r['xver']
     assert r['target'] == 'zpq:8444', r['target']
     assert len(r['shortIds']) == 2 and len(set(r['shortIds'])) == 2, r['shortIds']
