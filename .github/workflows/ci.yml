@@ -36,6 +36,32 @@ jobs:
       - name: Приманки проверки пересоздания Xray
         run: bash test/assert-recreated.test.sh
 
+      # Держатели, появившиеся со вторым сервером (ADR 2026-10-05-2223). У
+      # каждого свои приманки, и гоняются они БЕЗ docker: на вход держателям
+      # идёт разобранный compose и адаптированный Caddyfile, собранные руками.
+      # Поэтому приманки прогоняются и локально, до PR, — а на настоящем выводе
+      # docker те же держатели исполняет job `config` ниже.
+      - name: Приманки держателя наложений хостов
+        run: bash test/publication-guard.test.sh
+
+      - name: Приманки сторожа страницы маски
+        run: bash test/mask-page-guard.test.sh
+
+      - name: Приманки держателя слушателя маски
+        run: bash test/mask-listener-guard.test.sh
+
+      # Карта хостов bin/make-link.sh: ссылка с именем одного сервера и
+      # адресом другого по форме безупречна и просто не подключается.
+      - name: Карта хостов генератора ссылок
+        run: bash test/make-link.test.sh
+
+      # deploy/bootstrap.sh целиком без сервера не проверить, и приманки этого
+      # не изображают: они держат разбор аргументов и то одно свойство файла,
+      # на которое опирается разрешение запускать его формой
+      # `ssh … 'bash -s -- <имя>' < deploy/bootstrap.sh` (ADR 2026-10-06-1054).
+      - name: Приманки bootstrap — аргументы и целость тела при запуске со stdin
+        run: bash test/bootstrap.test.sh
+
   # Конфиг Xray. Сначала отказы рендера, потом само ядро на отрендеренном
   # шаблоне: `xray run -test` отвечает на вопрос «этот конфиг ядро примет»,
   # и отвечает тот же образ по тому же digest, что пойдёт на сервер.
@@ -80,155 +106,81 @@ jobs:
           # он стоит required: true.
           cp temp/secrets.env deploy/secrets.env
 
-      - name: Конфиг Xray проходит xray run -test
+      - name: Наложения хостов разбираются и держат публикации
         run: |
           set -euo pipefail
-          mkdir -p temp/conf
+          mkdir -p temp
+          # Разбирается НАЛОЖЕНИЕ, а не общая часть: сама по себе она не
+          # запускается и портов не публикует вовсе. Что получится на хосте,
+          # знает только слияние двух файлов, и делает его docker — тот же код,
+          # что исполняет выкатка.
+          for h in th1 th2; do
+            echo "::group::наложение $h"
+            docker compose -f deploy/compose.yml -f "deploy/hosts/$h/compose.yml" \
+              config --format json > "temp/compose-$h.json"
+            bash .github/scripts/publication-guard.sh "$h" "temp/compose-$h.json"
+            echo "::endgroup::"
+          done
+
+      - name: Конфиг Xray проходит xray run -test на каждом наложении
+        run: |
+          set -euo pipefail
           # Исполняется deploy/render/render.sh — тот самый файл, что
           # монтируется в единицу render на сервере. Копии рендера в CI нет.
           set -a
           # shellcheck disable=SC1091
           . ./temp/secrets.env
           set +a
-          # XRAY_TARGET берётся ИЗ compose, а не записан здесь второй раз: иначе
-          # CI рендерил бы конфиг с одним target, а сервер — с другим, и
-          # расхождение контракта прогон бы не заметил.
-          XRAY_TARGET=$(docker compose -f deploy/compose.yml config --format json | jq -r '.services.render.environment.XRAY_TARGET')
-          echo "XRAY_TARGET из compose: $XRAY_TARGET"
-          export XRAY_TARGET
-          TEMPLATE=deploy/config.template.json OUT=temp/conf/config.json \
-            sh deploy/render/render.sh
-          # render.sh кладёт результат под 0400 и чужим владельцем не делает:
-          # прогон идёт не от root. Образ Xray работает под uid 65532, и без
-          # этой строки он получил бы permission denied, а шаг — отказ,
-          # который выглядел бы отказом конфига.
-          chmod 644 temp/conf/config.json
-          # Образ берётся ИЗ compose, а не записан здесь второй раз: иначе
-          # CI проверял бы одну версию ядра, а сервер запускал другую.
-          image=$(docker compose -f deploy/compose.yml config --format json | jq -r '.services.xray.image')
-          echo "образ из compose: $image"
-          case "$image" in
-            *@sha256:*) ;;
-            *) echo "::error::образ Xray в compose не закреплён digest'ом"; exit 1 ;;
-          esac
-          docker run --rm -v "$PWD/temp/conf:/conf:ro" "$image" run -c /conf/config.json -test
+          for h in th1 th2; do
+            echo "::group::xray run -test на наложении $h"
+            # XRAY_TARGET и MASK_NAME берутся ИЗ наложения, а не записаны здесь
+            # вторым местом: иначе CI рендерил бы конфиг с одними значениями, а
+            # сервер — с другими, и расхождение прогон бы не заметил. Их
+            # ЗНАЧЕНИЯ сверяет держатель наложений шагом выше; здесь важно
+            # только, что конфиг с ними ядро принимает.
+            XRAY_TARGET=$(jq -r '.services.render.environment.XRAY_TARGET' "temp/compose-$h.json")
+            MASK_NAME=$(jq -r '.services.render.environment.MASK_NAME' "temp/compose-$h.json")
+            export XRAY_TARGET MASK_NAME
+            echo "из наложения: XRAY_TARGET=$XRAY_TARGET MASK_NAME=$MASK_NAME"
+            mkdir -p "temp/conf-$h"
+            TEMPLATE=deploy/config.template.json OUT="temp/conf-$h/config.json" \
+              sh deploy/render/render.sh
+            # render.sh кладёт результат под 0400 и чужим владельцем не делает:
+            # прогон идёт не от root. Образ Xray работает под uid 65532, и без
+            # этой строки он получил бы permission denied, а шаг — отказ,
+            # который выглядел бы отказом конфига.
+            chmod 644 "temp/conf-$h/config.json"
+            # Образ берётся ИЗ наложения, а не записан здесь: иначе CI проверял
+            # бы одну версию ядра, а сервер запускал другую. Закреплённость
+            # digest'ом держит publication-guard.sh шагом выше.
+            image=$(jq -r '.services.xray.image' "temp/compose-$h.json")
+            echo "образ из наложения: $image"
+            docker run --rm -v "$PWD/temp/conf-$h:/conf:ro" "$image" \
+              run -c /conf/config.json -test
+            echo "::endgroup::"
+          done
+          # Один шаблон на два хоста — и это проверено тем, что ядро приняло
+          # ОБА отрендеренных конфига, а не тем, что файл один.
 
-      - name: Compose разбирается и наружу опубликован ровно один порт
+      # Маска th2 живёт в этом репозитории, поэтому и её держатели — здесь.
+      # У th1 маска в MikeKharr/zpq-ai, и её держит шаг CI того репозитория.
+      - name: Страница маски th2 ничего не выдаёт и закрыта от роботов
+        run: bash .github/scripts/mask-page-guard.sh deploy/hosts/th2/cdn
+
+      - name: Слушатель маски th2 — noindex, без h3, строгий SNI
         run: |
           set -euo pipefail
-          json=$(docker compose -f deploy/compose.yml config --format json)
-          # Наружу публикуется РОВНО ОДИН порт: у службы xray, формы
-          # `<конкретный IPv4>:443:8443` (ADR 2026-10-05-1546, п. 7). Части
-          # формы держатся по отдельности, потому что ломаются они по-разному,
-          # и ни один из этих отказов не виден без этого шага:
+          # Проверяется РЕЗУЛЬТАТ адаптации, а не текст Caddyfile: grep по
+          # файлу зеленел бы и на заголовке, уехавшем в чужой блок, и на
+          # `protocols`, заданном не тому серверу.
           #
-          #   host_ip пустой (голое `443:8443`) или 0.0.0.0 — это ВСЕ адреса
-          #   машины: Xray отнял бы 443 у единицы `sni` на прежнем адресе и
-          #   уронил сайты. Признак пришёл бы не отсюда, а с прода —
-          #   `port is already allocated` на выкатке, уже после
-          #   `--force-recreate`, то есть при лежащем VPN.
-          #   published != 443 — имя cdn.zpq.ai перестаёт быть «родным для
-          #   своего адреса»: маска отвечает на 443 или не отвечает вовсе.
-          #   target != 8443 — публикация вела бы в inbound vless-443 с
-          #   `acceptProxyProtocol: true`, где Xray требует заголовок PROXY
-          #   (политика REQUIRE, ADR п. 1). Выкатка зелёная, маска снаружи
-          #   молчит, клиент не подключается.
-          #   второй порт — незамеченное расширение поверхности публичной
-          #   машины; снятие единственного — обрыв рабочего входа. И то и
-          #   другое — отдельное решение, а не попутная правка.
-          ports=$(printf '%s' "$json" | jq -c '[.services | to_entries[] | {svc: .key, p: (.value.ports // [])[]}]')
-          count=$(printf '%s' "$ports" | jq 'length')
-          if [ "$count" != 1 ]; then
-            echo "::error::наружу опубликовано портов: $count, а их ровно один — у службы xray, формы <конкретный IPv4>:443:8443 (ADR 2026-10-05-1546, п. 7). Вторая публикация и снятие этой — отдельное решение и отдельный PR"
-            echo "::error::что разобрано: $ports"
-            exit 1
-          fi
-          # Положительный контроль ФОРМЫ вывода: `docker compose config`
-          # нормализует ports в длинную форму (host_ip/published/target/
-          # protocol). Если версия compose начнёт отдавать короткую строку,
-          # проверки частей ниже не нашли бы ни одного поля — пусть это будет
-          # отказ с причиной, а не зелёный шаг, который ничего не проверил.
-          kind=$(printf '%s' "$ports" | jq -r '.[0].p | type')
-          if [ "$kind" != object ]; then
-            echo "::error::docker compose config отдал ports не длинной формой, а $kind — проверки host_ip/published/target ниже перестали бы что-либо проверять"
-            exit 1
-          fi
-          svc=$(printf '%s' "$ports" | jq -r '.[0].svc')
-          host_ip=$(printf '%s' "$ports" | jq -r '.[0].p.host_ip // ""')
-          # published приходит строкой в одних версиях compose и числом в
-          # других — отсюда tostring, иначе сравнение зеленело бы или краснело
-          # бы от версии раннера, а не от содержимого compose.
-          published=$(printf '%s' "$ports" | jq -r '.[0].p.published | tostring')
-          target=$(printf '%s' "$ports" | jq -r '.[0].p.target | tostring')
-          proto=$(printf '%s' "$ports" | jq -r '.[0].p.protocol // "tcp"')
-          echo "публикация: служба=$svc адрес=$host_ip снаружи=$published внутри=$target протокол=$proto"
-          bad=''
-          [ "$svc" = xray ] || bad="$bad служба=$svc(ожидалась xray)"
-          case "$host_ip" in
-            '') bad="$bad адрес-не-задан(голое 443:8443 — это ВСЕ адреса машины)" ;;
-            0.0.0.0|::|'[::]'|'*') bad="$bad адрес=$host_ip(все адреса машины)" ;;
-            *) printf '%s' "$host_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' \
-                 || bad="$bad адрес=$host_ip(не литерал IPv4)" ;;
-          esac
-          [ "$published" = 443 ] || bad="$bad снаружи=$published(ожидался 443)"
-          [ "$target" = 8443 ] || bad="$bad внутри=$target(ожидался 8443)"
-          [ "$proto" = tcp ] || bad="$bad протокол=$proto(ожидался tcp)"
-          if [ -n "$bad" ]; then
-            echo "::error::публикация порта не той формы:$bad — требуется <конкретный IPv4>:443:8443 у службы xray (ADR 2026-10-05-1546, п. 1 и 7)"
-            exit 1
-          fi
-          echo "ok: наружу опубликован ровно один порт — $host_ip:443 в xray:8443/tcp"
-          # Алиас в edge — строка межрепозиторного контракта: по нему sni
-          # проекта zpq-ai находит контейнер. Переименование тихо ломает VPN.
-          alias=$(printf '%s' "$json" | jq -r '.services.xray.networks.edge.aliases // [] | join(" ")')
-          case " $alias " in
-            *" vpn "*) echo "ok: алиас vpn в сети edge на месте" ;;
-            *) echo "::error::у службы xray нет алиаса vpn в сети edge — sni не найдёт её"; exit 1 ;;
-          esac
-          # XRAY_TARGET — вторая строка межрепозиторного контракта, и держится
-          # она так же, как алиас `vpn`: сверкой со значением, записанным здесь.
-          # Прежде значение жило в secrets.env на сервере, где его не видел ни
-          # один шаг, и опечатка `caddy:443` прошла бы и проверку формы, и
-          # `xray run -test`, и выкатку — признаком остался бы только
-          # неподключающийся клиент (находка reviewer).
-          #
-          # Порт 8444, а не 443: отдельный внутренний слушатель Caddy проекта
-          # zpq-ai, за которым стоит только страница маски. Проброс в общий вход
-          # на 443 открывал бы клиенту VPN все имена машины — блокирующая к ADR
-          # zpq-ai 2026-10-03-1544. Смена значения — правка ЭТОЙ строки и строки
-          # в compose вместе, то есть видимая в диффе.
-          want_target='zpq:8444'
-          target=$(printf '%s' "$json" | jq -r '.services.render.environment.XRAY_TARGET // ""')
-          if [ "$target" != "$want_target" ]; then
-            echo "::error::XRAY_TARGET в compose равен '$target', а контракт требует '$want_target' — см. ADR 2026-10-03-0353, п. 1 и ADR zpq-ai 2026-10-03-1544"
-            exit 1
-          fi
-          echo "ok: XRAY_TARGET равен контрактному"
-
-          # Секреты видит ТОЛЬКО render. Проверка идёт по упоминанию
-          # `secrets.env` или имени REALITY_PRIVATE_KEY в службе целиком, а не
-          # по полю env_file: `docker compose config` в разных версиях то
-          # оставляет env_file путями, то разрешает его в environment, и
-          # проверка `has("env_file")` в одной из этих форм зеленела бы всегда,
-          # то есть молча не проверяла бы ничего. Сверено на четырёх формах
-          # вывода («Красная ветвь» в описании PR). Сам $json в журнал не
-          # печатается: в разрешённой форме он содержит значения.
-          # $svc — переменная jq, не shell: кавычки одинарные намеренно.
-          # shellcheck disable=SC2016
-          probe='.services[$svc] | tostring | test("REALITY_PRIVATE_KEY|secrets\\.env")'
-          holds_render=$(printf '%s' "$json" | jq -r --arg svc render "$probe")
-          holds_xray=$(printf '%s' "$json" | jq -r --arg svc xray "$probe")
-          # Положительный контроль: если бы `secrets.env` исчез из вывода и у
-          # render, значит форма вывода сменилась и проверка ниже мертва.
-          if [ "$holds_render" != true ]; then
-            echo "::error::в выводе compose нет связи render с secrets.env — форма вывода сменилась, и проверка «ключ не у xray» перестала что-либо проверять"
-            exit 1
-          fi
-          if [ "$holds_xray" = true ]; then
-            echo "::error::служба xray упоминает secrets.env или REALITY_PRIVATE_KEY — приватный ключ попал бы в её окружение; секреты видит только render"
-            exit 1
-          fi
-          echo "ok: секреты у render, у xray их нет"
+          # Образ Caddy берётся ИЗ наложения по digest — адаптирует та же
+          # версия, что потом исполняет конфигурацию на сервере.
+          image=$(jq -r '.services.mask.image' temp/compose-th2.json)
+          echo "образ Caddy из наложения: $image"
+          docker run --rm -v "$PWD/deploy/hosts/th2:/w:ro" -w /w "$image" \
+            caddy adapt --config Caddyfile > temp/caddy-th2.json
+          bash .github/scripts/mask-listener-guard.sh temp/caddy-th2.json
 
   shell:
     runs-on: ubuntu-latest

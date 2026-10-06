@@ -5,6 +5,18 @@
     "loglevel": "warning",
     "dnsLog": false
   },
+  // Плейсхолдер MASK_NAME (ниже, в двух inbound'ах) — имя маски в
+  // serverNames REALITY. Литералом его здесь
+  // больше нет: шаблон один на два хоста, а имена у них разные
+  // (cdn.zpq.ai у th1, cdn2.zpq.ai у th2 — ADR 2026-10-05-2223). Значение
+  // приезжает из `environment` службы render в deploy/hosts/<хост>/compose.yml,
+  // как и значение XRAY_TARGET: это не секрет, и в secrets.env у него не было бы
+  // ни одного держателя. Форму проверяет deploy/render/render.sh, значение —
+  // шаг ci.yml по каждому наложению.
+  //
+  // Ссылка клиента обязана нести `sni=` с ТЕМ ЖЕ именем (bin/make-link.sh):
+  // имени, которого нет в serverNames, REALITY не принимает, и рукопожатие
+  // не состоится.
   "inbounds": [
     {
       "tag": "vless-443",
@@ -37,7 +49,7 @@
           "target": "__XRAY_TARGET__",
           "xver": 0,
           "serverNames": [
-            "cdn.zpq.ai"
+            "__MASK_NAME__"
           ],
           "privateKey": "__REALITY_PRIVATE_KEY__",
           "shortIds": [
@@ -81,7 +93,7 @@
           "target": "__XRAY_TARGET__",
           "xver": 0,
           "serverNames": [
-            "cdn.zpq.ai"
+            "__MASK_NAME__"
           ],
           "privateKey": "__REALITY_PRIVATE_KEY__",
           "shortIds": [
