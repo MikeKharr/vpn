@@ -43,7 +43,7 @@ check() {
   eval "value=\${$1:-}"
   printf '%s' "$value" | grep -Eq "$2" || die "значение $1 не той формы: ожидается $3" 3
 }
-check REALITY_PRIVATE_KEY '^[A-Za-z0-9_-]{43}$' '43 знака base64url — поле PrivateKey из вывода xray x25519'
+check REALITY_PRIVATE_KEY '^[A-Za-z0-9_-]{43}$' '43 знака base64url — поле PrivateKey пары x25519 ЭТОГО хоста'
 check UUID_MAC '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' 'UUID — вывод uuidgen'
 check UUID_IPHONE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' 'UUID — вывод uuidgen'
 check SHORTID_MAC '^[0-9a-f]{8}$' '8 знаков hex в нижнем регистре — вывод openssl rand -hex 4'
