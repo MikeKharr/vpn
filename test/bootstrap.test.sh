@@ -46,7 +46,11 @@ case_is() {
     return
   fi
   if ! printf '%s' "$out" | grep -qF -- "$needle"; then
-    bad "$title" "в выводе нет куска «$needle»"
+    # Скобки у имени обязательны: закрывающая «»» — многобайтная, и без них
+    # bash считает её частью имени переменной и падает на `set -u`
+    # сообщением «needle»: unbound variable». Поймано мутационной проверкой
+    # формы FAIL2BAN_IGNOREIP: до неё эта ветвь ни разу не исполнялась.
+    bad "$title" "в выводе нет куска «${needle}»"
     return
   fi
   ok "$title"
@@ -64,7 +68,8 @@ case_ignoreip() {
     return
   fi
   if ! printf '%s' "$out" | grep -qF -- "$needle"; then
-    bad "$title" "в выводе нет куска «$needle»"
+    # Скобки у имени — по той же причине, что в case_is выше.
+    bad "$title" "в выводе нет куска «${needle}»"
     return
   fi
   ok "$title"
