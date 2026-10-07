@@ -46,10 +46,46 @@ case_is() {
     return
   fi
   if ! printf '%s' "$out" | grep -qF -- "$needle"; then
-    bad "$title" "в выводе нет куска «$needle»"
+    # Скобки у имени обязательны: закрывающая «»» — многобайтная, и без них
+    # bash считает её частью имени переменной и падает на `set -u`
+    # сообщением «needle»: unbound variable». Поймано мутационной проверкой
+    # формы FAIL2BAN_IGNOREIP: до неё эта ветвь ни разу не исполнялась.
+    bad "$title" "в выводе нет куска «${needle}»"
     return
   fi
   ok "$title"
+}
+
+# То же, но с переменной окружения перед аргументами: `$1` — заголовок,
+# `$2` — ожидаемый код, `$3` — кусок вывода, `$4` — значение
+# FAIL2BAN_IGNOREIP, далее аргументы скрипта.
+case_ignoreip() {
+  local title="$1" want_rc="$2" needle="$3" value="$4"; shift 4
+  local out rc=0
+  out=$(FAIL2BAN_IGNOREIP="$value" bash "$script" "$@" 2>&1) || rc=$?
+  if [ "$rc" != "$want_rc" ]; then
+    bad "$title" "ждали код $want_rc, получили $rc"
+    return
+  fi
+  if ! printf '%s' "$out" | grep -qF -- "$needle"; then
+    # Скобки у имени — по той же причине, что в case_is выше.
+    bad "$title" "в выводе нет куска «${needle}»"
+    return
+  fi
+  ok "$title"
+}
+
+# Вырезает ТЕЛО функции верхнего уровня из файла скрипта: от строки
+# «<имя>() {» до первой закрывающей скобки в нулевой колонке. Так приманки
+# ниже проверяют настоящий код bootstrap.sh, а не его пересказ в тесте, — и
+# мутация в самом bootstrap.sh до них доезжает.
+# $1 — файл, $2 — имя функции.
+extract_fn() {
+  awk -v want="$2() {" '
+    $0 == want { inside = 1 }
+    inside     { print }
+    inside && $0 == "}" { exit }
+  ' "$1"
 }
 
 echo '--- аргументы: имя пользователя выкатки ---'
@@ -83,6 +119,141 @@ echo '--- годное имя доходит до проверки на root ---
 # годное имя обязано дойти именно до этой проверки — и дальше не пойти.
 case_is 'ops принят, отказ уже на «не root»'   1 'запускать от root' ops
 case_is 'ops --disable-root-login принят'      1 'запускать от root' ops --disable-root-login
+
+echo '--- FAIL2BAN_IGNOREIP: форма проверяется до root ---'
+# Негодный адрес обязан остановить скрипт ЗДЕСЬ, а не доехать до
+# /etc/fail2ban/jail.local: fail2ban отвергает jail с негодным ignoreip
+# целиком, то есть прогон был бы зелёным, а машина — без бана вовсе.
+case_ignoreip 'не адрес — отказ'                1 'не адрес IPv4' 'zzz' ops
+case_ignoreip 'обрезанный адрес — отказ'        1 'не адрес IPv4' '1.2.3' ops
+# Проверяется КАЖДОЕ слово списка: иначе один годный адрес впереди пропускал
+# бы любую строку за ним.
+case_ignoreip 'негодный второй в списке — отказ' 1 'не адрес IPv4' '45.91.134.19 1.2.3' ops
+# Положительные контроли: годное значение не отвергается и доезжает до
+# проверки на root.
+case_ignoreip 'адрес принят'                    1 'запускать от root' '45.91.134.19' ops
+case_ignoreip 'адрес с маской принят'           1 'запускать от root' '45.91.134.19/32' ops
+case_ignoreip 'список годных принят'            1 'запускать от root' '45.91.134.19 10.0.0.0/8' ops
+# Переменной нет вовсе — скрипт обязан работать как прежде (значение
+# необязательно: на третьей машине ignoreip может быть не нужен).
+case_ignoreip 'пустое значение — не отказ'      1 'запускать от root' '' ops
+
+echo '--- reload_sshd не перезапускает ssh.socket ---'
+# Чем это куплено. Первый живой прогон на th2 обрывался ровно здесь: функция
+# делала `systemctl restart ssh` и сразу `systemctl restart ssh.socket`, и
+# вторая команда убивала сессию, через которую скрипт шёл на stdin (у
+# ssh.service `Requires=ssh.socket`). Файрвол, fail2ban, автообновления и
+# отчёт не исполнялись.
+#
+# Проверяется НАСТОЯЩЕЕ тело функции из bootstrap.sh, вырезанное по позиции,
+# с подставными `systemctl`, `sshd` и `die`, которые только пишут свой argv в
+# журнал. Так видно, какие команды функция ВЫПОЛНЯЕТ, а не что о ней
+# написано.
+run_reload() {  # $1 — файл скрипта; печатает журнал вызовов
+  local src="$1" h="$work/reload-harness.sh"
+  {
+    # Подставные команды пишутся в файл обвязки как ТЕКСТ: расширяться `$*` и
+    # `$CALLS` обязаны при прогоне обвязки, а не здесь.
+    cat <<'PRELUDE'
+set -uo pipefail
+sshd()      { echo "sshd $*" >> "$CALLS"; return 0; }
+systemctl() { echo "systemctl $*" >> "$CALLS"; return 0; }
+die()       { echo "die $*" >> "$CALLS"; exit 1; }
+PRELUDE
+    extract_fn "$src" reload_sshd
+    echo 'reload_sshd'
+  } > "$h"
+  : > "$work/calls"
+  CALLS="$work/calls" bash "$h" >/dev/null 2>&1 || true
+  cat "$work/calls"
+}
+
+if ! extract_fn "$script" reload_sshd | grep -q 'systemctl restart ssh$'; then
+  bad 'фикстура reload_sshd собирается' 'в вырезанном теле reload_sshd нет «systemctl restart ssh» — приманка ниже проверяла бы не то'
+else
+  calls=$(run_reload "$script")
+  if printf '%s\n' "$calls" | grep -q '^systemctl restart ssh$'; then
+    ok 'reload_sshd перезапускает службу ssh'
+  else
+    bad 'reload_sshd перезапускает службу ssh' "журнал вызовов: $(printf '%s' "$calls" | tr '\n' '; ')"
+  fi
+  if printf '%s\n' "$calls" | grep -q 'ssh\.socket'; then
+    bad 'ssh.socket не трогается' "функция обращается к ssh.socket — запуск формой «ssh … bash -s < bootstrap.sh» снова оборвётся. Журнал: $(printf '%s' "$calls" | tr '\n' '; ')"
+  else
+    ok 'ssh.socket не трогается: сессия запуска не умирает'
+  fi
+
+  # Красная ветвь. Мутация адресуется НОМЕРОМ СТРОКИ: за строкой перезапуска
+  # службы дописывается прежний перезапуск сокета.
+  n=$(grep -n '^  systemctl restart ssh$' "$script" | head -1 | cut -d: -f1)
+  if [ -z "$n" ]; then
+    bad 'мутация reload_sshd собирается' 'строка «  systemctl restart ssh» не найдена — мутацию некуда вставить'
+  else
+    awk -v n="$n" 'NR==n { print; print "  systemctl restart ssh.socket"; next } { print }' \
+      "$script" > "$work/socket-back.sh"
+    printf '   мутация в строку %s: %s\n' "$((n + 1))" "$(sed -n "$((n + 1))p" "$work/socket-back.sh")"
+    if printf '%s\n' "$(run_reload "$work/socket-back.sh")" | grep -q 'ssh\.socket'; then
+      ok 'мутация краснеет: возвращённый перезапуск сокета виден приманке'
+    else
+      bad 'мутация краснеет' 'с возвращённым «systemctl restart ssh.socket» приманка его не заметила — значит она не различает прежнюю форму от исправленной'
+    fi
+  fi
+fi
+
+echo '--- фильтр посторонних слушателей ---'
+# Первый живой прогон на th2 выдал «на внешних адресах слушают ещё порты: 53».
+# Это systemd-resolved на 127.0.0.53 и 127.0.0.54 — петлевые адреса, снаружи
+# недостижимые. Прежний образец исключал только 127.0.0.1.
+#
+# Фикстура — вывод `ss -Hltn` в его настоящих четырёх колонках
+# (State Recv-Q Send-Q Local Peer): функция берёт четвёртое поле.
+cat > "$work/ss-out" <<'EOF'
+LISTEN 0 4096 127.0.0.53:53 0.0.0.0:*
+LISTEN 0 4096 127.0.0.54:53 0.0.0.0:*
+LISTEN 0 4096 127.0.0.1:631 0.0.0.0:*
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:*
+LISTEN 0 511 [::]:443 [::]:*
+LISTEN 0 4096 [::1]:5432 [::]:*
+LISTEN 0 4096 0.0.0.0:3389 0.0.0.0:*
+EOF
+
+run_filter() {  # $1 — файл скрипта; печатает выход фильтра на фикстуре
+  local src="$1" h="$work/filter-harness.sh"
+  {
+    echo 'set -uo pipefail'
+    extract_fn "$src" extra_listeners
+    echo 'extra_listeners'
+  } > "$h"
+  bash "$h" < "$work/ss-out"
+}
+
+if ! extract_fn "$script" extra_listeners | grep -q 'grep -vE'; then
+  bad 'фикстура фильтра собирается' 'в вырезанном теле extra_listeners нет исключающего grep — приманка проверяла бы не то'
+else
+  got=$(run_filter "$script" | tr '\n' ' ')
+  if [ "$got" = "3389 " ]; then
+    ok 'фильтр оставляет только настоящий посторонний порт (3389)'
+  else
+    bad 'фильтр оставляет только 3389' "получили «${got}»: петлевые 53/631/5432 или штатные 22/443 просочились"
+  fi
+
+  # Красная ветвь: образец заменяется на прежний, исключавший только
+  # 127.0.0.1. Адресуется номером строки.
+  n=$(grep -n "grep -vE '\^(127" "$script" | head -1 | cut -d: -f1)
+  if [ -z "$n" ]; then
+    bad 'мутация фильтра собирается' 'строка с исключающим образцом не найдена — мутацию некуда вставить'
+  else
+    awk -v n="$n" \
+      'NR==n { print "    | grep -vE '"'"'^(127\\.0\\.0\\.1|\\[::1\\]|\\[::ffff:127\\.0\\.0\\.1\\])'"'"' \\"; next } { print }' \
+      "$script" > "$work/old-filter.sh"
+    printf '   мутация в строку %s: %s\n' "$n" "$(sed -n "${n}p" "$work/old-filter.sh")"
+    if run_filter "$work/old-filter.sh" | grep -qx 53; then
+      ok 'мутация краснеет: с прежним образцом 53 от systemd-resolved снова считается внешним'
+    else
+      bad 'мутация краснеет' 'с прежним образцом порт 53 всё равно отфильтрован — значит приманка не различает образцы'
+    fi
+  fi
+fi
 
 echo '--- stdin не съедается при запуске конвейером ---'
 # Фикстура собирается ИЗ САМОГО bootstrap.sh и адресуется ПОЗИЦИЕЙ: строкой,
