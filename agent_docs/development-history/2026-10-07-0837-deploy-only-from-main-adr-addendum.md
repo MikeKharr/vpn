@@ -21,6 +21,14 @@
   `fail2ban-client get sshd ignoreip` → `127.0.0.0/8`, `::1`,
   `45.91.134.19`. Пункт «не применён» из записи 2026-10-07-0622 закрыт.
 
+- **Вход для root на th2 закрыт** — проверено оркестратором с Mac
+  2026-10-07 ключом владельца:
+
+  ```text
+  $ ssh -i ~/.ssh/triplify_admin -o IdentitiesOnly=yes -o BatchMode=yes root@160.236.128.28 true
+  root@160.236.128.28: Permission denied (publickey).
+  ```
+
 ## Граница
 
 Ветка `main` на стороне GitHub по-прежнему не защищена (запрет прямого

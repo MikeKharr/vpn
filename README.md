@@ -51,7 +51,7 @@ ssh triplify 'bash -s -- ops --disable-root-login' < deploy/bootstrap.sh
 ```
 
 Три вещи в этой форме взяты не из вкуса, а из первого живого прогона на th2
-(2026-10-07, запись
+(прогон 2026-10-06, исправления 2026-10-07, запись
 [2026-10-07-0516](agent_docs/development-history/2026-10-07-0516-bootstrap-th2-first-run-fixes.md)):
 
 - **`FAIL2BAN_IGNOREIP=45.91.134.19`** — адрес выхода th1. Все устройства
