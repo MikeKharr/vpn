@@ -195,7 +195,10 @@ run_jail() {  # $1 — файл скрипта, $2 — значение FAIL2BAN
   b=$(awk -v s="$a" 'NR>s && $0 == "fi" { print NR; exit }' "$src")
   d=$(grep -n '^} > /etc/fail2ban/jail\.local$' "$src" | head -1 | cut -d: -f1)
   c=$(awk -v e="$d" '$0 == "{" && NR < e { n = NR } END { print n }' "$src")
-  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] || { echo "НЕТ-ФИКСТУРЫ a=$a b=$b c=$c d=$d"; return; }
+  if [ -z "$a" ] || [ -z "$b" ] || [ -z "$c" ] || [ -z "$d" ]; then
+    echo "НЕТ-ФИКСТУРЫ a=$a b=$b c=$c d=$d"
+    return
+  fi
   {
     echo 'set -uo pipefail'
     echo 'die() { echo "die $*" >&2; exit 1; }'
