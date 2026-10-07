@@ -71,9 +71,8 @@ ssh triplify 'bash -s -- ops --disable-root-login' < deploy/bootstrap.sh
 `Host triplify` в `~/.ssh/config` владельца — `root@160.236.128.28` с ключом
 `~/.ssh/triplify_admin` (ADR
 [2026-10-06-1054](agent_docs/adr/2026-10-06-1054-agent-runs-th2-bootstrap-once.md),
-п. 1). Блок команд в том ADR — **без** `FAIL2BAN_IGNOREIP` и без
-`IdentitiesOnly=yes`: принятый ADR не редактируется, дополнение к нему ждёт
-владельца в [бэклоге](agent_docs/backlog.md). Действующая форма — эта.
+п. 1). Блок команд в том ADR устарел; действующая форма принята владельцем как его
+«Дополнение 2026-10-07» и совпадает с блоком выше.
 
 ## Порядок первой установки
 
