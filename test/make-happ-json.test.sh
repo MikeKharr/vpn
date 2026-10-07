@@ -20,14 +20,25 @@
 #      ни один клиент. Проверяется сверкой содержимого ДО и ПОСЛЕ и тем, что
 #      `xray` не позван вовсе (журнал аргументов).
 #   4. КЛЮЧ СОЗДАЁТСЯ, когда его нет: отдельный прогон с обёрткой над `xray`.
-#   5. STDOUT — РОВНО ПУТЬ, одна строка. Приглашения и сообщения в stderr.
-#   6. ФОРМА. Негодное значение не даёт собрать файл.
-#   7. ПОЛЯ JSON — сверка ПОЛНЫМ РАВЕНСТВОМ разобранного конфига ожидаемому.
-#      Не выборка полей: конфиг уже импортирован в Happ на Mac, переимпорт в
-#      поездке рвёт туннель (ADR 2026-10-05-2223, «Последствия»), поэтому
-#      проверке подлежит вся структура, а не те поля, про которые вспомнили.
-#   8. ЯДРО ПРИНИМАЕТ КОНФИГ: `xray run -test`. Берётся `xray` из PATH, иначе
-#      закреплённый digest'ом образ из deploy/compose.yml, иначе шаг
+#   5. STDOUT — РОВНО ДВА ПУТИ, по строке на файл, в порядке
+#      «TH failover», «TH mobile». Приглашения и сообщения в stderr.
+#   6. ФОРМА. Негодное значение не даёт собрать НИ ОДНОГО файла.
+#   7. ПОЛЯ JSON — сверка ПОЛНЫМ РАВЕНСТВОМ разобранного конфига ожидаемому, у
+#      КАЖДОГО из двух профилей. Не выборка полей: «TH failover» уже
+#      импортирован в Happ на двух устройствах, переимпорт в поездке рвёт
+#      туннель (ADR 2026-10-05-2223, «Последствия»), поэтому проверке подлежит
+#      вся структура, а не те поля, про которые вспомнили. Для «TH failover»
+#      эта сверка — ЕДИНСТВЕННЫЙ держатель того, что добавление второго
+#      профиля (ADR 2026-10-07-1123) не изменило его выход ни на байт.
+#   8. ТРАНСПОРТ «TH mobile» СОВПАДАЕТ С СЕРВЕРОМ. `path` и `xPaddingBytes`
+#      сверяются не с литералом в этом файле, а с inbound `vless-xhttp` в
+#      deploy/config.template.json: сервер сверяет путь префиксом
+#      (splithttp/hub.go:103) и ПРОВЕРЯЕТ длину набивки клиента на попадание в
+#      свой отрезок (hub.go:142-148), поэтому расхождение двух литералов — это
+#      профиль, который ядро примет, а сервер отдаст 400 или 404. Два литерала
+#      в двух файлах без держателя разошлись бы первой же правкой.
+#   9. ЯДРО ПРИНИМАЕТ ОБА КОНФИГА: `xray run -test`. Берётся `xray` из PATH,
+#      иначе закреплённый digest'ом образ из deploy/compose.yml, иначе шаг
 #      пропускается С НАЗВАННОЙ ПРИЧИНОЙ и прогон остаётся зелёным — молчащий
 #      пропуск не отличался бы от пройденной проверки.
 #
@@ -44,7 +55,9 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 script="$root/bin/make-happ-json.sh"
+template="$root/deploy/config.template.json"
 [ -r "$script" ] || { echo "нет $script"; exit 2; }
+[ -r "$template" ] || { echo "нет $template"; exit 2; }
 
 pass=0
 fail=0
@@ -91,11 +104,22 @@ for cmd in mkdir chmod python3; do
       # родились. Это единственный способ увидеть действие umask: после
       # chmod его следа не остаётся, и строку `umask 077` можно было бы
       # удалить при зелёном прогоне.
-      printf 'for a; do :; done\n'
+      # Журналится КАЖДЫЙ аргумент, а не последний: `chmod 600 a b` — одна
+      # команда на два файла, и запись только о последнем оставила бы права
+      # первого при рождении без держателя вовсе.
       # shellcheck disable=SC2016
-      printf 'm=$(%s -c "%%a" "$a" 2>/dev/null || %s -f "%%Lp" "$a")\n' "$stat_abs" "$stat_abs"
+      printf 'for a; do\n'
       # shellcheck disable=SC2016
-      printf 'printf "%%s %%s\\n" "$m" "$a" >> "%s"\n' "$work/birth.log"
+      printf '  case "$a" in -*) continue ;; esac\n'
+      # Режим («600», «700») — такой же аргумент, и файлом он не является:
+      # без этой строки в журнал ложилась бы строка без прав вовсе.
+      # shellcheck disable=SC2016
+      printf '  [ -e "$a" ] || continue\n'
+      # shellcheck disable=SC2016
+      printf '  m=$(%s -c "%%a" "$a" 2>/dev/null || %s -f "%%Lp" "$a")\n' "$stat_abs" "$stat_abs"
+      # shellcheck disable=SC2016
+      printf '  printf "%%s %%s\\n" "$m" "$a" >> "%s"\n' "$work/birth.log"
+      printf 'done\n' 
     fi
     printf 'exec %s "$@"\n' "$real"
   } > "$shim/$cmd"
@@ -175,19 +199,29 @@ seed_keys() {
 home="$work/home-clean"
 seed_keys "$home"
 want="$home/.config/vpn/happ-failover.json"
+want_mobile="$home/.config/vpn/happ-mobile.json"
 rc=0
 run "$home" '' "$link" || rc=$?
 
 if [ "$rc" = 0 ]; then ok 'прогон завершился кодом 0'; else bad "прогон вернул код $rc: $(safe_err)"; fi
 
-if [ "$(cat "$work/out")" = "$want" ]; then
-  ok 'stdout — ровно путь к файлу'
+# Контракт stdout — ДВЕ строки в заданном порядке: README велит владельцу
+# положить в буфер второй файл по его пути, и перепутанный порядок увёл бы в
+# Happ не тот профиль под тем же именем «Импорт из буфера».
+if [ "$(cat "$work/out")" = "$(printf '%s\n%s' "$want" "$want_mobile")" ]; then
+  ok 'stdout — ровно два пути: сначала happ-failover.json, потом happ-mobile.json'
 else
-  bad "stdout не равен пути к файлу (строк: $(wc -l < "$work/out"))"
+  bad "stdout не равен двум путям в нужном порядке (строк: $(wc -l < "$work/out"))"
 fi
 
-if [ -f "$want" ]; then ok 'файл конфига на месте'; else bad 'файла конфига нет'; fi
-if [ "$(mode_of "$want")" = 600 ]; then ok 'файл 0600'; else bad "файл $(mode_of "$want"), а не 0600"; fi
+if [ -f "$want" ]; then ok 'файл «TH failover» на месте'; else bad 'файла happ-failover.json нет'; fi
+if [ -f "$want_mobile" ]; then ok 'файл «TH mobile» на месте'; else bad 'файла happ-mobile.json нет'; fi
+if [ "$(mode_of "$want")" = 600 ]; then ok 'файл «TH failover» 0600'; else bad "файл $(mode_of "$want"), а не 0600"; fi
+if [ -f "$want_mobile" ] && [ "$(mode_of "$want_mobile")" = 600 ]; then
+  ok 'файл «TH mobile» 0600'
+else
+  bad "happ-mobile.json $(mode_of "$want_mobile" 2>/dev/null), а не 0600"
+fi
 if [ "$(mode_of "$home/.config/vpn")" = 700 ]; then
   ok 'каталог 0700'
 else
@@ -208,12 +242,14 @@ fi
 # проверок без единой строки вывода. Проверено мутацией «снят chmod 600 на
 # конфиг»: в первой редакции она не краснела, а молча обрывала прогон, то
 # есть этот файл не отличал бы провал от аварии.
-birth_cfg=$(grep -F 'happ-failover.json' "$work/birth.log" | head -n 1 | cut -d' ' -f1 || true)
-if [ "$birth_cfg" = 600 ]; then
-  ok 'конфиг родился 0600 (umask), а не был закрыт потом'
-else
-  bad "права конфига при рождении: [$birth_cfg], ждали 600"
-fi
+for base in happ-failover.json happ-mobile.json; do
+  birth_cfg=$(grep -F "$base" "$work/birth.log" | head -n 1 | cut -d' ' -f1 || true)
+  if [ "$birth_cfg" = 600 ]; then
+    ok "$base родился 0600 (umask), а не был закрыт потом"
+  else
+    bad "права $base при рождении: [$birth_cfg], ждали 600"
+  fi
+done
 
 # Ключ не тронут: ни по содержимому, ни по тому, что xray вообще не позван.
 if [ "$(cat "$home/.config/vpn/th2-reality.key")" = "$priv2" ] \
@@ -228,8 +264,8 @@ else
   ok 'xray не позван при существующем ключе'
 fi
 
-# Под HOME ровно три файла: пара ключей и конфиг. Ни временного, ни резервной
-# копии.
+# Под HOME ровно четыре файла: пара ключей и два профиля. Ни временного, ни
+# резервной копии.
 #
 # ЧЕСТНАЯ ГРАНИЦА: считаются файлы ПОД HOME. Файл, записанный скриптом куда-то
 # ещё (`/tmp`, каталог запуска), эта сверка не увидит. Общего держателя у «ни
@@ -244,7 +280,7 @@ fi
 # есть без вычета она краснела бы от выбора python3, а не от поведения
 # скрипта. На Homebrew'ском python3 и на python3 раннера кеша нет.
 files=$(find "$home" -type f -not -path '*/Library/Caches/com.apple.python/*' | wc -l | tr -d ' ')
-if [ "$files" = 3 ]; then ok 'под HOME ровно три файла — пара ключей и конфиг'; else bad "под HOME файлов: $files, ждали 3"; fi
+if [ "$files" = 4 ]; then ok 'под HOME ровно четыре файла — пара ключей и два профиля'; else bad "под HOME файлов: $files, ждали 4"; fi
 
 assert_no_leak 'обычный прогон'
 
@@ -254,21 +290,22 @@ assert_no_leak 'обычный прогон'
 # форме не отличить от сломанного файла проверок. Поэтому отказ называется, и
 # прогон кончается итогом. Проверено мутацией «ключ пересоздаётся всегда»: в
 # первой редакции она давала ровно такой обрыв.
-if [ ! -f "$want" ]; then
-  bad 'конфига нет — сверка структуры, xray run -test и прогоны формы не выполнены'
+if [ ! -f "$want" ] || [ ! -f "$want_mobile" ]; then
+  bad 'одного из профилей нет — сверка структуры, xray run -test и прогоны формы не выполнены'
   printf '\nитог: пройдено %s, провалено %s\n' "$pass" "$fail"
   exit 1
 fi
 
-# --- 2. Структура конфига: полное равенство ожидаемому ----------------------
+# --- 2. Структура обоих конфигов: полное равенство ожидаемому ---------------
 # Значения уходят в python по stdin, не аргументом: те же правила, что у
 # самого скрипта.
 #
 # Программа проверки кладётся в файл, а не подаётся по stdin: stdin занят
 # значениями. Сама программа не секрет, значения — секрет.
-cat > "$work/check.py" <<'PY'
-import sys, json
+cat > "$work/check.py" <<'CHECKPY'
+import sys, json, re
 uuid, pbk, pub2, sid = [l.strip() for l in sys.stdin.read().splitlines()[:4]]
+which, got_path, tmpl_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def ob(tag, ip, sni, key):
     return {"tag": tag, "protocol": "vless",
@@ -276,28 +313,61 @@ def ob(tag, ip, sni, key):
       "streamSettings": {"network": "tcp", "security": "reality",
         "realitySettings": {"serverName": sni, "fingerprint": "chrome", "publicKey": key, "shortId": sid, "spiderX": "/"}}}
 
-want = {
- "remarks": "TH failover",
- "log": {"loglevel": "warning"},
- "dns": {"servers": ["https://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4", "tag": "dns-in"},
- "inbounds": [
-  {"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": {"udp": True}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
-  {"tag": "http", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}}],
- "outbounds": [
-  ob("th2", "160.236.128.28", "cdn2.zpq.ai", pub2),
-  ob("th1", "45.91.134.23", "cdn.zpq.ai", pbk),
-  {"tag": "direct", "protocol": "freedom"},
-  {"tag": "block", "protocol": "blackhole"}],
- "observatory": {"subjectSelector": ["th"], "probeUrl": "https://www.gstatic.com/generate_204", "probeInterval": "30s"},
- "routing": {"domainStrategy": "AsIs",
-  "balancers": [{"tag": "main", "selector": ["th2"], "fallbackTag": "th1", "strategy": {"type": "leastPing"}}],
-  "rules": [
-   {"inboundTag": ["dns-in"], "balancerTag": "main"},
-   {"ip": ["geoip:private"], "outboundTag": "direct"},
-   {"network": "udp", "port": "443", "outboundTag": "block"},
-   {"network": "tcp,udp", "balancerTag": "main"}]}}
+# Транспорт «TH mobile» берётся ИЗ ШАБЛОНА СЕРВЕРА, а не записан здесь
+# литералом: сервер сверяет путь префиксом и проверяет длину набивки клиента на
+# попадание в свой отрезок, поэтому расхождение двух литералов — это 404 или 400
+# вместо туннеля. Берётся именно inbound `vless-xhttp` — тот, в который TCP-входы
+# отдают соединение по `fallbacks` (ADR 2026-10-07-1123).
+raw = open(tmpl_path).read()
+tmpl = json.loads(re.sub(r'(?m)^[ \t]*//.*$', '', raw))
+srv = [i for i in tmpl['inbounds'] if i['tag'] == 'vless-xhttp'][0]['streamSettings']
+assert srv['network'] == 'xhttp', srv['network']
+xs = srv['xhttpSettings']
+xhttp = {"path": xs['path'], "mode": "stream-up", "xPaddingBytes": xs['xPaddingBytes']}
 
-got = json.load(open(sys.argv[1]))
+def ob_xhttp(tag, ip, sni, key):
+    return {"tag": tag, "protocol": "vless",
+      "settings": {"vnext": [{"address": ip, "port": 443, "users": [{"id": uuid, "encryption": "none"}]}]},
+      "streamSettings": {"network": "xhttp", "security": "reality",
+        "realitySettings": {"serverName": sni, "fingerprint": "chrome", "publicKey": key, "shortId": sid, "spiderX": "/"},
+        "xhttpSettings": xhttp}}
+
+def want_for(remarks, obs):
+    tags = [o["tag"] for o in obs]
+    return {
+     "remarks": remarks,
+     "log": {"loglevel": "warning"},
+     "dns": {"servers": ["https://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4", "tag": "dns-in"},
+     "inbounds": [
+      {"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": {"udp": True}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+      {"tag": "http", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}}],
+     "outbounds": obs + [
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}],
+     "observatory": {"subjectSelector": ["th"], "probeUrl": "https://www.gstatic.com/generate_204", "probeInterval": "30s"},
+     "routing": {"domainStrategy": "AsIs",
+      "balancers": [{"tag": "main", "selector": [tags[0]], "fallbackTag": tags[1], "strategy": {"type": "leastPing"}}],
+      "rules": [
+       {"inboundTag": ["dns-in"], "balancerTag": "main"},
+       {"ip": ["geoip:private"], "outboundTag": "direct"},
+       {"network": "udp", "port": "443", "outboundTag": "block"},
+       {"network": "tcp,udp", "balancerTag": "main"}]}}
+
+if which == "failover":
+    want = want_for("TH failover", [
+      ob("th2", "160.236.128.28", "cdn2.zpq.ai", pub2),
+      ob("th1", "45.91.134.23", "cdn.zpq.ai", pbk)])
+elif which == "mobile":
+    # Адрес th1 — 45.91.134.23, прямой вход, как у «TH failover», а не
+    # 45.91.134.19 из эксперимента: ADR 2026-10-07-1123, п. 2.
+    want = want_for("TH mobile", [
+      ob_xhttp("th2-xhttp", "160.236.128.28", "cdn2.zpq.ai", pub2),
+      ob_xhttp("th1-xhttp", "45.91.134.23", "cdn.zpq.ai", pbk)])
+else:
+    sys.stderr.write("неизвестный профиль: " + which + "\n")
+    raise SystemExit(2)
+
+got = json.load(open(got_path))
 if got == want:
     raise SystemExit(0)
 # Расхождение называется ПУТЁМ, а не печатью конфигов: в них значения.
@@ -320,50 +390,87 @@ def paths(a, b, p=""):
         yield p or "."
 sys.stderr.write("расхождения: " + " ".join(sorted(set(paths(got, want)))) + "\n")
 raise SystemExit(1)
-PY
-cfg_rc=0
-printf '%s\n%s\n%s\n%s\n' "$uuid" "$pbk" "$pub2" "$sid" \
-  | "$python_abs" "$work/check.py" "$want" > "$work/cfg.out" 2>&1 || cfg_rc=$?
-if [ "$cfg_rc" = 0 ]; then
-  ok 'конфиг совпадает с ожидаемым ПОЛНОСТЬЮ: теги th2/th1/direct/block, балансер main с fallbackTag th1, observatory, dns, inbounds 10808/10809, remarks'
+CHECKPY
+
+check_cfg() {
+  # $1 — профиль (failover|mobile), $2 — путь к собранному файлу
+  local rc=0
+  printf '%s\n%s\n%s\n%s\n' "$uuid" "$pbk" "$pub2" "$sid" \
+    | "$python_abs" "$work/check.py" "$1" "$2" "$template" > "$work/cfg-$1.out" 2>&1 || rc=$?
+  return "$rc"
+}
+
+if check_cfg failover "$want"; then
+  ok '«TH failover» совпадает с ожидаемым ПОЛНОСТЬЮ: теги th2/th1/direct/block, балансер main с fallbackTag th1, observatory, dns, inbounds 10808/10809, remarks. Это же — держатель того, что второй профиль не изменил его ни на байт'
 else
-  bad "конфиг разошёлся с ожидаемым: $(cat "$work/cfg.out")"
+  bad "«TH failover» разошёлся с ожидаемым: $(cat "$work/cfg-failover.out")"
 fi
 
-# Положительный контроль сверки: на фикстуре с одним изменённым полем она
-# обязана сказать «разошлось». Без него зелёная сверка не отличалась бы от
-# сверки, которая сравнивает что-нибудь само с собой.
+if check_cfg mobile "$want_mobile"; then
+  ok '«TH mobile» совпадает с ожидаемым ПОЛНОСТЬЮ: теги th2-xhttp/th1-xhttp, xhttp+reality без flow, mode stream-up, балансер main с fallbackTag th1-xhttp, observatory; path и xPaddingBytes — из inbound vless-xhttp шаблона сервера'
+else
+  bad "«TH mobile» разошёлся с ожидаемым: $(cat "$work/cfg-mobile.out")"
+fi
+
+# Положительный контроль сверки, по одному на профиль: на фикстуре с одним
+# изменённым полем она обязана сказать «разошлось». Без него зелёная сверка не
+# отличалась бы от сверки, которая сравнивает что-нибудь само с собой.
+#
+# Поля выбраны не наугад: у «TH failover» это `fallbackTag` — без него профиль
+# работал бы без резерва; у «TH mobile» — `path`, расхождение которого с
+# сервером даёт 404, а не отказ ядра, то есть именно тот случай, который
+# литералом в проверке не ловился бы вовсе.
+control() {
+  # $1 — профиль, $2 — фикстура, $3 — путь, который сверка обязана назвать
+  local rc=0
+  printf '%s\n%s\n%s\n%s\n' "$uuid" "$pbk" "$pub2" "$sid" \
+    | "$python_abs" "$work/check.py" "$1" "$2" "$template" > "$work/mut-$1.out" 2>&1 || rc=$?
+  if [ "$rc" != 0 ] && grep -q "$3" "$work/mut-$1.out"; then
+    ok "сверка «$1» умеет краснеть: на фикстуре она называет $3"
+  else
+    bad "сверка «$1» не покраснела на подменённом $3: код $rc, вывод $(cat "$work/mut-$1.out")"
+  fi
+}
+
 "$python_abs" -c '
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 cfg["routing"]["balancers"][0]["fallbackTag"] = "direct"
 json.dump(cfg, open(sys.argv[2], "w"), ensure_ascii=False, indent=1)
-' "$want" "$work/mutated.json"
-mut_rc=0
-printf '%s\n%s\n%s\n%s\n' "$uuid" "$pbk" "$pub2" "$sid" \
-  | "$python_abs" "$work/check.py" "$work/mutated.json" > "$work/mut.out" 2>&1 || mut_rc=$?
-if [ "$mut_rc" != 0 ] && grep -q 'fallbackTag' "$work/mut.out"; then
-  ok 'сверка умеет краснеть: на фикстуре с fallbackTag=direct она называет этот путь'
-else
-  bad "сверка не покраснела на подменённом fallbackTag: код $mut_rc, вывод $(cat "$work/mut.out")"
-fi
+' "$want" "$work/mutated-failover.json"
+control failover "$work/mutated-failover.json" fallbackTag
 
-# --- 3. Ядро принимает конфиг ----------------------------------------------
-# Копия с правами 0644 в отдельном каталоге: образ Xray работает под uid
+"$python_abs" -c '
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg["outbounds"][0]["streamSettings"]["xhttpSettings"]["path"] = "/другой/путь"
+json.dump(cfg, open(sys.argv[2], "w"), ensure_ascii=False, indent=1)
+' "$want_mobile" "$work/mutated-mobile.json"
+control mobile "$work/mutated-mobile.json" path
+
+# --- 3. Ядро принимает ОБА конфига ------------------------------------------
+# Копии с правами 0644 в отдельных каталогах: образ Xray работает под uid
 # 65532 и файл 0600 владельца прогона ему не прочитать — отказ выглядел бы
 # отказом конфига.
+#
+# Проверяются ОБА профиля: у «TH mobile» своя форма streamSettings
+# (network: xhttp плюс xhttpSettings), и конфиг, который ядро не примет,
+# выглядел бы на устройстве как «профиль не подключается».
 core="$work/core"
-mkdir -p "$core"
-cp "$want" "$core/config.json"
-chmod 644 "$core/config.json"
-core_rc=0
+mkdir -p "$core/failover" "$core/mobile"
+cp "$want" "$core/failover/config.json"
+cp "$want_mobile" "$core/mobile/config.json"
+chmod 644 "$core/failover/config.json" "$core/mobile/config.json"
 if command -v xray >/dev/null 2>&1; then
-  out=$(xray run -test -c "$core/config.json" 2>&1) || core_rc=$?
-  if [ "$core_rc" = 0 ]; then
-    ok "ядро приняло конфиг: xray run -test из PATH ($(xray version 2>/dev/null | head -n 1))"
-  else
-    bad "xray run -test вернул код $core_rc: $out"
-  fi
+  for prof in failover mobile; do
+    core_rc=0
+    out=$(xray run -test -c "$core/$prof/config.json" 2>&1) || core_rc=$?
+    if [ "$core_rc" = 0 ]; then
+      ok "ядро приняло «${prof}»: xray run -test из PATH ($(xray version 2>/dev/null | head -n 1))"
+    else
+      bad "xray run -test на «${prof}» вернул код $core_rc: $out"
+    fi
+  done
 elif command -v docker >/dev/null 2>&1; then
   # Образ берётся ИЗ compose, а не записан здесь второй раз: иначе проверялась
   # бы одна версия ядра, а на сервере стояла другая. `grep`, а не
@@ -375,15 +482,18 @@ elif command -v docker >/dev/null 2>&1; then
     *) bad "образ Xray в compose не закреплён digest'ом — проверять этим нельзя"; image='' ;;
   esac
   if [ -n "$image" ]; then
-    out=$(docker run --rm -v "$core:/conf:ro" "$image" run -c /conf/config.json -test 2>&1) || core_rc=$?
-    if [ "$core_rc" = 0 ]; then
-      ok "ядро приняло конфиг: xray run -test в образе $image"
-    else
-      bad "xray run -test в образе вернул код $core_rc: $out"
-    fi
+    for prof in failover mobile; do
+      core_rc=0
+      out=$(docker run --rm -v "$core/$prof:/conf:ro" "$image" run -c /conf/config.json -test 2>&1) || core_rc=$?
+      if [ "$core_rc" = 0 ]; then
+        ok "ядро приняло «${prof}»: xray run -test в образе $image"
+      else
+        bad "xray run -test на «${prof}» в образе вернул код $core_rc: $out"
+      fi
+    done
   fi
 else
-  printf 'ПРОПУСК ядро не проверено: ни xray в PATH, ни docker — поставить xray (brew install xray) или запустить там, где есть docker\n'
+  printf 'ПРОПУСК ядро не проверено ни на одном профиле: ни xray в PATH, ни docker — поставить xray (brew install xray) или запустить там, где есть docker\n'
 fi
 
 # --- 4. Ключа нет: создаётся, права 0600, публичный уходит в конфиг ---------
@@ -424,8 +534,9 @@ mkdir -p "$home"
 rc=0
 run "$home" '' "$link" || rc=$?
 if [ "$rc" != 0 ] && [ ! -e "$home/.config/vpn/th2-reality.key" ] \
-   && [ ! -e "$home/.config/vpn/happ-failover.json" ]; then
-  ok "вывод xray не разобрался: отказ кодом $rc, ни ключа, ни конфига"
+   && [ ! -e "$home/.config/vpn/happ-failover.json" ] \
+   && [ ! -e "$home/.config/vpn/happ-mobile.json" ]; then
+  ok "вывод xray не разобрался: отказ кодом $rc, ни ключа, ни одного из двух конфигов"
 else
   bad "вывод xray не разобрался, а прогон вернул $rc и что-то записал"
 fi
@@ -438,14 +549,17 @@ home="$work/home-loose"
 seed_keys "$home"
 chmod 755 "$home/.config/vpn"
 : > "$home/.config/vpn/happ-failover.json"
-chmod 644 "$home/.config/vpn/happ-failover.json"
+: > "$home/.config/vpn/happ-mobile.json"
+chmod 644 "$home/.config/vpn/happ-failover.json" "$home/.config/vpn/happ-mobile.json"
 rc=0
 run "$home" '' "$link" || rc=$?
 loose="$home/.config/vpn"
-if [ "$rc" = 0 ] && [ "$(mode_of "$loose")" = 700 ] && [ "$(mode_of "$loose/happ-failover.json")" = 600 ]; then
-  ok 'уже существующие 0755/0644 приведены к 0700/0600'
+if [ "$rc" = 0 ] && [ "$(mode_of "$loose")" = 700 ] \
+   && [ "$(mode_of "$loose/happ-failover.json")" = 600 ] \
+   && [ "$(mode_of "$loose/happ-mobile.json")" = 600 ]; then
+  ok 'уже существующие 0755/0644 приведены к 0700/0600 у каталога и ОБОИХ профилей'
 else
-  bad "существующие права не исправлены: код $rc, каталог $(mode_of "$loose"), файл $(mode_of "$loose/happ-failover.json")"
+  bad "существующие права не исправлены: код $rc, каталог $(mode_of "$loose"), файлы $(mode_of "$loose/happ-failover.json") / $(mode_of "$loose/happ-mobile.json")"
 fi
 assert_no_leak 'прогон поверх существующего файла'
 
@@ -460,11 +574,12 @@ form_case() {
   local rc=0
   run "$h" '' "$value" || rc=$?
   local produced=no
-  [ -f "$h/.config/vpn/happ-failover.json" ] && produced=yes
+  [ -f "$h/.config/vpn/happ-failover.json" ] && produced=failover
+  [ -f "$h/.config/vpn/happ-mobile.json" ] && produced="$produced+mobile"
   if [ "$rc" != 0 ] && [ "$produced" = no ]; then
-    ok "$title: отказ кодом $rc, конфига нет"
+    ok "$title: отказ кодом $rc, ни одного конфига нет"
   else
-    bad "$title: код $rc, конфиг собран: $produced"
+    bad "$title: код $rc, собрано: $produced"
   fi
   assert_no_leak "$title"
 }
@@ -487,8 +602,9 @@ printf '%s\n' "$priv2" > "$home/.config/vpn/th2-reality.key"
 printf '%s\n' "${pub2:0:40}" > "$home/.config/vpn/th2-reality.pub"
 rc=0
 run "$home" '' "$link" || rc=$?
-if [ "$rc" != 0 ] && [ ! -f "$home/.config/vpn/happ-failover.json" ]; then
-  ok "публичный ключ th2 не той формы: отказ кодом $rc, конфига нет"
+if [ "$rc" != 0 ] && [ ! -f "$home/.config/vpn/happ-failover.json" ] \
+   && [ ! -f "$home/.config/vpn/happ-mobile.json" ]; then
+  ok "публичный ключ th2 не той формы: отказ кодом $rc, ни одного конфига нет"
 else
   bad "публичный ключ th2 не той формы, а код $rc и конфиг собран"
 fi

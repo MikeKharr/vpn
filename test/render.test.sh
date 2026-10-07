@@ -130,50 +130,93 @@ raw = open(sys.argv[1]).read()
 cfg = json.loads(re.sub(r'(?m)^[ \t]*//.*$', '', raw))
 assert cfg['log'] == {'access': 'none', 'error': '', 'loglevel': 'warning', 'dnsLog': False}, cfg['log']
 ports = [i['port'] for i in cfg['inbounds']]
-assert ports == [443, 8443], ports
+assert ports == [443, 8443, 8445], ports
 
 by_tag = {i['tag']: i for i in cfg['inbounds']}
-assert sorted(by_tag) == ['vless-443', 'vless-8443'], sorted(by_tag)
+assert sorted(by_tag) == ['vless-443', 'vless-8443', 'vless-xhttp'], sorted(by_tag)
 
-# РАБОЧИЙ вход обоих серверов. Проверки ниже стояли «по всем inbound», и с
-# ADR 2026-10-07-0920 они сужены до ЭТОГО тега: у vless-443 теперь XHTTP без
-# Vision. Сужение — осознанное ослабление инварианта на одном слушателе (ADR,
-# «Последствия»), и ровно поэтому держатели рабочего входа стали ИМЕННЫМИ:
-# «у всех inbound» зеленело бы и на входе, которого в наборе не осталось.
-work = by_tag['vless-8443']
-assert work['streamSettings']['network'] == 'tcp', work['streamSettings']['network']
-assert work['streamSettings']['tcpSettings']['acceptProxyProtocol'] is False, work['streamSettings']['tcpSettings']
-assert 'sockopt' not in work['streamSettings'], work['streamSettings'].keys()
-assert all(c['flow'] == 'xtls-rprx-vision' for c in work['settings']['clients']), work['settings']['clients']
+# ДВА TCP-ВХОДА, ОДНА ФОРМА (ADR 2026-10-07-1123, п. 1 и 4). Эксперимент
+# 0920 делал vless-443 XHTTP-only, и держатели рабочего входа тогда стали
+# ИМЕННЫМИ; имена оставлены и после снятия эксперимента, потому что свойства
+# двух TCP-входов совпадают не во всём: PROXY protocol у 443 принимается, у
+# 8443 — нет. «У всех inbound» зеленело бы теперь и на внутреннем входе без
+# TLS, и на входе, которого в наборе не осталось.
+#
+# fallbacks — одинаковые у обоих и ровно один, «по умолчанию»: без `name`,
+# `alpn` и `path`. Разбор `path` в fallback преамбулу HTTP/2 не видит вовсе
+# (inbound.go:383 считает её h2c по байту `*`), а `alpn` на живом прогоне
+# пуст — fallback по ним не срабатывал бы никогда.
+#
+# `dest` — АДРЕСОМ, а не числом: число ядро превращает в `localhost:<порт>`
+# (infra/conf/vless.go:199), а `localhost` в контейнере — две записи
+# /etc/hosts. Сверка строкой держит и это.
+#
+# `xver` у fallback НЕ задан, и сверка на это именная: при ненулевом ядро
+# дописало бы в соединение к `dest` заголовок PROXY protocol
+# (inbound.go:437-489), а inbound `vless-xhttp` его не ждёт. Проверено живым
+# прогоном на петле с образом 26.9.30: при `xver: 2` XHTTP-клиент получает 0
+# байт и `failed to fallback request payload > broken pipe`.
+WANT_FB = [{'dest': '127.0.0.1:8445'}]
+for tag, want_pp in (('vless-443', True), ('vless-8443', False)):
+    inb = by_tag[tag]
+    ss = inb['streamSettings']
+    assert ss['network'] == 'tcp', (tag, ss['network'])
+    # security именно REALITY, а не наследство набора inbound'ов. До ADR 1123
+    # этого не держало ничто: `security: "none"` на входе наружу отдавал бы
+    # VLESS открытым текстом, а `xray run -test` такой конфиг примет молча.
+    # Находка compliance к PR #28; в объёме она потому, что путь XHTTP
+    # записан литералом в клиентском профиле, а внутренний XHTTP-вход стоит
+    # без TLS — спутать «тот, что без TLS» с «тем, что наружу» стало дешевле.
+    assert ss['security'] == 'reality', (tag, ss['security'])
+    assert ss['tcpSettings']['acceptProxyProtocol'] is want_pp, (tag, ss['tcpSettings'])
+    # sockopt нет ни у кого: при network: tcp флаг снова живёт в tcpSettings
+    # (ядро само переносит его в SocketSettings — transport/internet/tcp/hub.go:40).
+    assert 'sockopt' not in ss, (tag, ss.keys())
+    assert 'xhttpSettings' not in ss, (tag, ss.keys())
+    # Vision у ВСЕХ клиентов ОБОИХ TCP-входов: инвариант, суженный
+    # экспериментом 0920, вернулся в полную силу — но именными проверками.
+    assert all(c['flow'] == 'xtls-rprx-vision' for c in inb['settings']['clients']), (tag, inb['settings']['clients'])
+    fb = inb['settings']['fallbacks']
+    assert fb == WANT_FB, (tag, fb)
+    assert all('xver' not in f for f in fb), (tag, fb)
 
-# ЭКСПЕРИМЕНТАЛЬНЫЙ вход th1: XHTTP поверх REALITY (ADR 2026-10-07-0920, шаг 2).
-exp = by_tag['vless-443']
-ss = exp['streamSettings']
+# ВНУТРЕННИЙ вход профиля «TH mobile»: XHTTP без TLS на петле контейнера.
+xh = by_tag['vless-xhttp']
+ss = xh['streamSettings']
+# listen строго 127.0.0.1. На 0.0.0.0 этот вход стал бы слушателем, который
+# достаточно опубликовать по ошибке, чтобы отдать VLESS без всякого REALITY.
+assert xh['listen'] == '127.0.0.1', xh['listen']
 assert ss['network'] == 'xhttp', ss['network']
-# PROXY protocol от единицы `sni` обязан стоять в sockopt: слушатель XHTTP
-# берёт его оттуда (splithttp/hub.go:535 -> system_listener.go:169-171), а
-# tcpSettings при network: xhttp не читается вовсе. Оставленный там флаг тихо
-# перестал бы требовать заголовок, и Xray принял бы его за данные VLESS —
-# поэтому проверяется И наличие в sockopt, И отсутствие tcpSettings.
-assert ss['sockopt']['acceptProxyProtocol'] is True, ss.get('sockopt')
+# security: none обязателен, а не выбран: клиент XHTTP при REALITY говорит
+# только HTTP/2 (splithttp/dialer.go:82-84), а слушатель XHTTP без TLS
+# принимает именно НЕЗАШИФРОВАННЫЙ HTTP/2 (hub.go:558-559). Шифрование не
+# теряется: REALITY уже сработал на TCP-входе выше.
+assert ss['security'] == 'none', ss['security']
+# REALITY второго слоя здесь нет, и PROXY protocol сюда не приходит: заголовок
+# снимается обёрткой слушателя 443 задолго до fallback, а fallback без `xver`
+# своего не ставит.
+assert 'realitySettings' not in ss, ss.keys()
+assert 'sockopt' not in ss, ss.keys()
 assert 'tcpSettings' not in ss, ss.keys()
+assert 'fallbacks' not in xh['settings'], xh['settings'].keys()
 # Vision снят с ОБЕИХ сторон этого входа: он работает только на «голом»
 # TLS/REALITY (proxy/vless/inbound/inbound.go:581), а сервер с Vision в
 # аккаунте отказал бы клиенту без него (там же, :594). `xray run -test` этого
 # не ловит — отказ случается на живом рукопожатии.
-assert all('flow' not in c for c in exp['settings']['clients']), exp['settings']['clients']
+assert all('flow' not in c for c in xh['settings']['clients']), xh['settings']['clients']
 x = ss['xhttpSettings']
 assert x['path'].startswith('/'), x['path']
 # mode именно "auto": конкретное значение на сервере отказывает клиенту с
-# другим режимом кодом 400 (hub.go:154,199,241), а тестовый профиль обязан
+# другим режимом кодом 400 (hub.go:154,199,241), а клиентский профиль обязан
 # менять режим без PR в шаблон.
 assert x['mode'] == 'auto', x['mode']
 # Отрезок, а не одно число, и нижняя граница — умолчание ядра: сервер
 # проверяет набивку клиента на попадание в свой отрезок (hub.go:142-148).
 assert x['xPaddingBytes'] == '100-3000', x['xPaddingBytes']
 
-for inb in cfg['inbounds']:
-    r = inb['streamSettings']['realitySettings']
+# REALITY — только у двух TCP-входов: у внутреннего его нет и быть не должно.
+for tag in ('vless-443', 'vless-8443'):
+    r = by_tag[tag]['streamSettings']['realitySettings']
     # Имя приходит из MASK_NAME (base_env выше), а не литералом из шаблона:
     # литерал стоял здесь до ADR 2026-10-05-2223 и был бы именем ПЕРВОГО
     # хоста на втором сервере — то есть `sni`, которого нет в serverNames.
@@ -181,7 +224,8 @@ for inb in cfg['inbounds']:
     assert r['xver'] == 0, r['xver']
     assert r['target'] == 'zpq:8444', r['target']
     assert len(r['shortIds']) == 2 and len(set(r['shortIds'])) == 2, r['shortIds']
-    assert inb['settings']['decryption'] == 'none'
+for inb in cfg['inbounds']:
+    assert inb['settings']['decryption'] == 'none', inb['tag']
 
 # Выход в приватные сети закрыт в самом Xray. Без этих строк правило снимут
 # попутной правкой, и прогон останется зелёным: `xray run -test` конфиг без

@@ -152,15 +152,16 @@
   командах: `reload_sshd` (не перезапускает `ssh.socket` — его перезапуск
   убивал сессию запуска) и `extra_listeners` (петлевая сеть целиком не
   считается внешней).
-- `bash test/make-happ-json.test.sh` — сборка клиентского конфига Happ:
+- `bash test/make-happ-json.test.sh` — сборка ДВУХ клиентских профилей Happ из
+  одного ввода («TH failover» и «TH mobile», ADR
+  [2026-10-07-1123](agent_docs/adr/2026-10-07-1123-th-mobile-profile-xhttp-fallback-443.md)):
   права, запрет перезаписи ключа th2, отсутствие значений в аргументах
-  процессов, полное равенство структуры ожидаемой. `xray run -test` внутри —
-  из PATH, иначе образом Xray из
-  `deploy/compose.yml`, иначе пропуск с названной причиной.
-- `bash test/make-happ-xhttp-test.test.sh` — сборка тестового профиля XHTTP
-  (ADR `2026-10-07-0920`, шаг 2): то же, что у рабочей сборки, плюс сверка
-  `path` и `xPaddingBytes` с inbound `vless-443` в `deploy/config.template.json`
-  и то, что ни ключ th2, ни рабочий `happ-failover.json` не тронуты.
+  процессов, полное равенство структуры ожидаемой у каждого, сверка `path` и
+  `xPaddingBytes` «TH mobile» с inbound `vless-xhttp` в
+  `deploy/config.template.json`. Для «TH failover» это единственный держатель
+  того, что его выход не изменился ни на байт. `xray run -test` внутри — на
+  обоих профилях, из PATH, иначе образом Xray из `deploy/compose.yml`, иначе
+  пропуск с названной причиной.
 - `actionlint` и `shellcheck $(git ls-files '*.sh')`.
 - `xray run -test` на отрендеренном шаблоне и `caddy adapt` на Caddyfile
   маски th2 — только в CI (нужен Docker); `xray run -test` гоняется по
