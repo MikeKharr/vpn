@@ -44,7 +44,12 @@
 2. **Секреты на сервер кладёт только владелец** — `deploy/put-secrets.sh`,
    скрытым вводом. Агент их не генерирует, не печатает и не просит.
 3. **На сервер агент не ходит** руками, и это верно для **обоих** хостов.
-   Выкатка — только `.github/workflows/deploy.yml` по push в `main`.
+   Выкатка — только `.github/workflows/deploy.yml` по push в `main`, и с
+   ADR [2026-10-05-2223](agent_docs/adr/2026-10-05-2223-second-server-triplify-failover.md)
+   («Решения», п. 2) она идёт матрицей на оба хоста: по одному за раз,
+   резерв (th1) первым, `fail-fast: false`. Секреты доступа берутся из
+   environment своей строки матрицы (`production` / `production-th2`), и
+   пустой environment краснит job первым шагом, а не пропускает его молча.
    `docker compose exec` в прод запрещён (норма адвента, ADR
    `2026-09-11-1230`).
 
@@ -134,7 +139,9 @@
   `robots.txt`.
 - `bash test/mask-listener-guard.test.sh` — приманки держателя слушателя
   маски th2 на выводе `caddy adapt`: `X-Robots-Tag`, `protocols h1 h2` без
-  h3, `strict_sni_host`, набор слушателей.
+  h3, `strict_sni_host`, набор слушателей, выключенный TLS-ALPN-01 у каждого
+  ACME-issuer'а (443 этой машины держит Xray, поэтому выпуск сертификата
+  маски идёт только по HTTP-01 через опубликованный `:80`).
 - `bash test/make-link.test.sh` — карта хостов генератора ссылок: имя и
   адрес одного хоста не попадают в ссылку другого.
 - `bash test/bootstrap.test.sh` — приманки `deploy/bootstrap.sh`: разбор

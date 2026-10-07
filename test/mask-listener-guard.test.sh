@@ -67,6 +67,22 @@ cat > "$tmp/base.json" <<'JSON'
           ]
         }
       }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": ["cdn2.zpq.ai"],
+            "issuers": [
+              {
+                "module": "acme",
+                "email": "admin@zpq.ai",
+                "challenges": {"tls-alpn": {"disabled": true}}
+              }
+            ]
+          }
+        ]
+      }
     }
   }
 }
@@ -124,6 +140,20 @@ case_is 'сервера :80 нет'      1 'слушатели' 'del(.apps.http.
 case_is 'лишний слушатель 443' 1 'слушатели' '.apps.http.servers.srv2 = {"listen": [":443"], "routes": []}'
 case_is 'порт маски сменился'  2 'слушающих :8444' '.apps.http.servers.srv0.listen = ["8444"]'
 
+# Выпуск только по HTTP-01: TLS-ALPN-01 приходит на 443 имени, а 443 машины
+# держит Xray. Снятие строки `disable_tlsalpn_challenge` из Caddyfile даёт в
+# адаптации либо issuer без `challenges`, либо отсутствие issuer'а вовсе —
+# оба случая ниже.
+case_is 'TLS-ALPN не выключен'          1 'TLS-ALPN-01 не выключен' \
+  'del(.apps.tls.automation.policies[0].issuers[0].challenges)'
+case_is 'TLS-ALPN выключен значением false' 1 'TLS-ALPN-01 не выключен' \
+  '.apps.tls.automation.policies[0].issuers[0].challenges["tls-alpn"].disabled = false'
+# Вторая политика с тем же именем и своим issuer'ом: проверка «у первого
+# выключено» этого не различила бы, поэтому считаются все issuer'ы.
+case_is 'вторая политика без выключения' 1 'TLS-ALPN-01 не выключен' \
+  '.apps.tls.automation.policies += [{"subjects":["cdn2.zpq.ai"],"issuers":[{"module":"acme"}]}]'
+case_is 'блок tls пропал целиком'       1 'ни одного ACME-issuer' \
+  'del(.apps.tls)'
 echo '--- положительные контроли: проверка, которая перестала проверять ---'
 case_is 'серверов нет вовсе'   2 'ни одного http-сервера' '.apps.http.servers = {}'
 case_is 'два сервера :8444'    2 'должен быть ровно один' \
