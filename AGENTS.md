@@ -157,6 +157,10 @@
   процессов, полное равенство структуры ожидаемой. `xray run -test` внутри —
   из PATH, иначе образом Xray из
   `deploy/compose.yml`, иначе пропуск с названной причиной.
+- `bash test/make-happ-xhttp-test.test.sh` — сборка тестового профиля XHTTP
+  (ADR `2026-10-07-0920`, шаг 2): то же, что у рабочей сборки, плюс сверка
+  `path` и `xPaddingBytes` с inbound `vless-443` в `deploy/config.template.json`
+  и то, что ни ключ th2, ни рабочий `happ-failover.json` не тронуты.
 - `actionlint` и `shellcheck $(git ls-files '*.sh')`.
 - `xray run -test` на отрендеренном шаблоне и `caddy adapt` на Caddyfile
   маски th2 — только в CI (нужен Docker); `xray run -test` гоняется по

@@ -131,8 +131,47 @@ cfg = json.loads(re.sub(r'(?m)^[ \t]*//.*$', '', raw))
 assert cfg['log'] == {'access': 'none', 'error': '', 'loglevel': 'warning', 'dnsLog': False}, cfg['log']
 ports = [i['port'] for i in cfg['inbounds']]
 assert ports == [443, 8443], ports
-tcp = [i['streamSettings']['tcpSettings']['acceptProxyProtocol'] for i in cfg['inbounds']]
-assert tcp == [True, False], tcp
+
+by_tag = {i['tag']: i for i in cfg['inbounds']}
+assert sorted(by_tag) == ['vless-443', 'vless-8443'], sorted(by_tag)
+
+# РАБОЧИЙ вход обоих серверов. Проверки ниже стояли «по всем inbound», и с
+# ADR 2026-10-07-0920 они сужены до ЭТОГО тега: у vless-443 теперь XHTTP без
+# Vision. Сужение — осознанное ослабление инварианта на одном слушателе (ADR,
+# «Последствия»), и ровно поэтому держатели рабочего входа стали ИМЕННЫМИ:
+# «у всех inbound» зеленело бы и на входе, которого в наборе не осталось.
+work = by_tag['vless-8443']
+assert work['streamSettings']['network'] == 'tcp', work['streamSettings']['network']
+assert work['streamSettings']['tcpSettings']['acceptProxyProtocol'] is False, work['streamSettings']['tcpSettings']
+assert 'sockopt' not in work['streamSettings'], work['streamSettings'].keys()
+assert all(c['flow'] == 'xtls-rprx-vision' for c in work['settings']['clients']), work['settings']['clients']
+
+# ЭКСПЕРИМЕНТАЛЬНЫЙ вход th1: XHTTP поверх REALITY (ADR 2026-10-07-0920, шаг 2).
+exp = by_tag['vless-443']
+ss = exp['streamSettings']
+assert ss['network'] == 'xhttp', ss['network']
+# PROXY protocol от единицы `sni` обязан стоять в sockopt: слушатель XHTTP
+# берёт его оттуда (splithttp/hub.go:535 -> system_listener.go:169-171), а
+# tcpSettings при network: xhttp не читается вовсе. Оставленный там флаг тихо
+# перестал бы требовать заголовок, и Xray принял бы его за данные VLESS —
+# поэтому проверяется И наличие в sockopt, И отсутствие tcpSettings.
+assert ss['sockopt']['acceptProxyProtocol'] is True, ss.get('sockopt')
+assert 'tcpSettings' not in ss, ss.keys()
+# Vision снят с ОБЕИХ сторон этого входа: он работает только на «голом»
+# TLS/REALITY (proxy/vless/inbound/inbound.go:581), а сервер с Vision в
+# аккаунте отказал бы клиенту без него (там же, :594). `xray run -test` этого
+# не ловит — отказ случается на живом рукопожатии.
+assert all('flow' not in c for c in exp['settings']['clients']), exp['settings']['clients']
+x = ss['xhttpSettings']
+assert x['path'].startswith('/'), x['path']
+# mode именно "auto": конкретное значение на сервере отказывает клиенту с
+# другим режимом кодом 400 (hub.go:154,199,241), а тестовый профиль обязан
+# менять режим без PR в шаблон.
+assert x['mode'] == 'auto', x['mode']
+# Отрезок, а не одно число, и нижняя граница — умолчание ядра: сервер
+# проверяет набивку клиента на попадание в свой отрезок (hub.go:142-148).
+assert x['xPaddingBytes'] == '100-3000', x['xPaddingBytes']
+
 for inb in cfg['inbounds']:
     r = inb['streamSettings']['realitySettings']
     # Имя приходит из MASK_NAME (base_env выше), а не литералом из шаблона:
@@ -142,7 +181,6 @@ for inb in cfg['inbounds']:
     assert r['xver'] == 0, r['xver']
     assert r['target'] == 'zpq:8444', r['target']
     assert len(r['shortIds']) == 2 and len(set(r['shortIds'])) == 2, r['shortIds']
-    assert all(c['flow'] == 'xtls-rprx-vision' for c in inb['settings']['clients'])
     assert inb['settings']['decryption'] == 'none'
 
 # Выход в приватные сети закрыт в самом Xray. Без этих строк правило снимут
