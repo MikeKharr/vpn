@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# Собирает полный конфиг Xray для Happ: основной сервер — th2 (Triplify,
-# 160.236.128.28), резервный — th1 (45.91.134.23). Переключение делает сам
-# клиент: балансер с `fallbackTag` и `observatory` (ADR 2026-10-05-2223, п. 4;
-# основным th2 выбран владельцем — «Статус» того же ADR).
+# Собирает ДВА полных конфига Xray для Happ из одного ввода. У обоих основной
+# сервер — th2 (Triplify, 160.236.128.28), резервный — th1 (45.91.134.23), и
+# переключение делает сам клиент: балансер с `fallbackTag` и `observatory`
+# (ADR 2026-10-05-2223, п. 4; основным th2 выбран владельцем — «Статус» того же
+# ADR). Различаются они транспортом:
 #
-# Запускает ВЛАДЕЛЕЦ на своей машине. Файл кладётся в ~/.config/vpn и
-# импортируется в Happ через буфер обмена (README, «Клиент с автопереключением»).
+#   happ-failover.json, «TH failover» — VLESS + REALITY + Vision на порт 443
+#     обоих серверов. Профиль для Wi-Fi. Его выход обязан остаться БАЙТ В БАЙТ
+#     прежним — почему, сказано ниже;
+#   happ-mobile.json, «TH mobile» — тот же порт, те же ключи и тот же вход, но
+#     транспорт XHTTP и без Vision: на российской мобильной сети Vision-поток
+#     замерзает после ~15 КБ, а через XHTTP проходит 1 МБ целиком (замер
+#     2026-10-07, запись истории 2026-10-07-1124). На сервере это не новый
+#     слушатель наружу: TCP-входы шаблона отдают такое соединение по
+#     `fallbacks` внутреннему inbound `vless-xhttp` на петле контейнера
+#     (ADR 2026-10-07-1123). Профиль выбирается РУКАМИ: автоматики «по типу
+#     сети» в режиме JSON у Happ нет.
+#
+# Запускает ВЛАДЕЛЕЦ на своей машине. Файлы кладутся в ~/.config/vpn и
+# импортируются в Happ через буфер обмена (README, «Клиент с автопереключением»
+# и «Профиль TH mobile (мобильная сеть)»).
 #
 # Что этот скрипт НЕ делает, намеренно:
-#   - не печатает ни одного значения: в stdout уходит РОВНО путь к файлу,
-#     приглашения и сообщения — в stderr;
+#   - не печатает ни одного значения: в stdout уходят РОВНО два пути, по строке
+#     на файл; приглашения и сообщения — в stderr;
 #   - не кладёт значения в аргументы ни одного процесса: ссылка и публичный
 #     ключ уходят в python по stdin, иначе их было бы видно в `ps`
 #     (то же соображение, что в bin/make-link.sh и deploy/render/render.sh);
@@ -18,11 +32,15 @@
 #     означала бы, что ни один клиент к th2 не подключается;
 #   - не ходит на сервер и ничего оттуда не читает.
 #
-# ПОЧЕМУ ФОРМУ ЭТОГО ФАЙЛА МЕНЯТЬ НЕЛЬЗЯ БЕЗ РЕШЕНИЯ ВЛАДЕЛЬЦА: конфиг уже
-# импортирован в Happ на Mac профилем «TH failover», и переимпорт в поездке
-# рвёт туннель — то есть требует рабочего VPN, чтобы восстановить VPN. Любая
-# правка выхода — это переимпорт на двух устройствах (ADR 2026-10-05-2223,
-# «Последствия», «Режим JSON отключает интерфейс Happ»).
+# ПОЧЕМУ ФОРМУ ВЫХОДА МЕНЯТЬ НЕЛЬЗЯ БЕЗ РЕШЕНИЯ ВЛАДЕЛЬЦА: happ-failover.json
+# уже импортирован в Happ на двух устройствах, и переимпорт в поездке рвёт
+# туннель — то есть требует рабочего VPN, чтобы восстановить VPN. Любая правка
+# его выхода — это переимпорт на двух устройствах (ADR 2026-10-05-2223,
+# «Последствия», «Режим JSON отключает интерфейс Happ»). Что он не изменился
+# после добавления второго файла, держит не обещание автора, а сверка ПОЛНЫМ
+# РАВЕНСТВОМ в test/make-happ-json.test.sh — она стояла здесь до этой правки и
+# покраснела бы на любом отличии. То же касается happ-mobile.json со дня его
+# первого импорта.
 #
 # Запуск:  bash bin/make-happ-json.sh
 set -euo pipefail
@@ -34,6 +52,7 @@ mkdir -p "$D"
 # родиться 0755 раньше и не этим скриптом.
 chmod 700 "$D"
 OUT="$D/happ-failover.json"
+OUT_MOBILE="$D/happ-mobile.json"
 KEY="$D/th2-reality.key"
 PUB="$D/th2-reality.pub"
 
@@ -130,29 +149,73 @@ def ob(tag, ip, sni, key):
       "streamSettings": {"network": "tcp", "security": "reality",
         "realitySettings": {"serverName": sni, "fingerprint": fp, "publicKey": key, "shortId": sid, "spiderX": "/"}}}
 
-cfg = {
- "remarks": "TH failover",
- "log": {"loglevel": "warning"},
- "dns": {"servers": ["https://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4", "tag": "dns-in"},
- "inbounds": [
-  {"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": {"udp": True}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
-  {"tag": "http", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}}],
- "outbounds": [
+# Транспорт профиля «TH mobile». Значения обязаны совпадать с inbound
+# vless-xhttp в deploy/config.template.json, иначе рукопожатия не будет:
+#   path          — сервер сверяет его ПРЕФИКСОМ (splithttp/hub.go:103);
+#   xPaddingBytes — сервер ПРОВЕРЯЕТ длину набивки клиента на попадание в свой
+#                   отрезок (hub.go:142-148).
+# Два литерала в двух файлах разошлись бы первой же правкой, поэтому их
+# совпадение с шаблоном держит test/make-happ-json.test.sh: там они берутся ИЗ
+# шаблона, а не записаны вторым литералом.
+#
+# mode: "stream-up" выбран на клиенте, а не на сервере: на сервере стоит "auto",
+# который принимает все три режима (hub.go:154,199,241), поэтому другой режим —
+# правка ОДНОЙ строки здесь, без PR в серверный шаблон. Почему именно stream-up:
+# наверх один длинный POST, вниз один длинный GET, то есть ни одного постоянного
+# ручейка мелких запросов (его дал бы packet-up — ровно то, чего опасается
+# владелец). flow здесь НЕТ: Vision работает только на «голом» TLS/REALITY
+# (proxy/vless/inbound/inbound.go:581), а inbound vless-xhttp его и не
+# объявляет. xmux не задан намеренно: умолчания ядра держат не больше трёх
+# соединений, а «больше трёх параллельных рукопожатий к одному SNI» — сам по
+# себе признак из разбора ADR 2026-10-07-0920.
+XHTTP = {"path": "/assets/hls/segments", "mode": "stream-up", "xPaddingBytes": "100-3000"}
+
+def ob_xhttp(tag, ip, sni, key):
+    return {"tag": tag, "protocol": "vless",
+      "settings": {"vnext": [{"address": ip, "port": 443, "users": [{"id": uuid, "encryption": "none"}]}]},
+      "streamSettings": {"network": "xhttp", "security": "reality",
+        "realitySettings": {"serverName": sni, "fingerprint": fp, "publicKey": key, "shortId": sid, "spiderX": "/"},
+        "xhttpSettings": XHTTP}}
+
+# Общая часть двух профилей: всё, что не транспорт и не теги outbound. Одним
+# источником, а не двумя копиями: копии разошлись бы молча, и каждый прогон
+# остался бы зелёным против своего ожидаемого (находка бэклога «Две сборки
+# профилей Happ держат одинаковые блоки», 2026-10-07).
+def cfg_for(remarks, obs):
+    tags = [o["tag"] for o in obs]
+    return {
+     "remarks": remarks,
+     "log": {"loglevel": "warning"},
+     "dns": {"servers": ["https://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4", "tag": "dns-in"},
+     "inbounds": [
+      {"tag": "socks", "listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": {"udp": True}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+      {"tag": "http", "listen": "127.0.0.1", "port": 10809, "protocol": "http", "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}}],
+     "outbounds": obs + [
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}],
+     "observatory": {"subjectSelector": ["th"], "probeUrl": "https://www.gstatic.com/generate_204", "probeInterval": "30s"},
+     "routing": {"domainStrategy": "AsIs",
+      "balancers": [{"tag": "main", "selector": [tags[0]], "fallbackTag": tags[1], "strategy": {"type": "leastPing"}}],
+      "rules": [
+       {"inboundTag": ["dns-in"], "balancerTag": "main"},
+       {"ip": ["geoip:private"], "outboundTag": "direct"},
+       {"network": "udp", "port": "443", "outboundTag": "block"},
+       {"network": "tcp,udp", "balancerTag": "main"}]}}
+
+cfg = cfg_for("TH failover", [
   ob("th2", "160.236.128.28", "cdn2.zpq.ai", pub2),
-  ob("th1", "45.91.134.23", "cdn.zpq.ai", pbk),
-  {"tag": "direct", "protocol": "freedom"},
-  {"tag": "block", "protocol": "blackhole"}],
- "observatory": {"subjectSelector": ["th"], "probeUrl": "https://www.gstatic.com/generate_204", "probeInterval": "30s"},
- "routing": {"domainStrategy": "AsIs",
-  "balancers": [{"tag": "main", "selector": ["th2"], "fallbackTag": "th1", "strategy": {"type": "leastPing"}}],
-  "rules": [
-   {"inboundTag": ["dns-in"], "balancerTag": "main"},
-   {"ip": ["geoip:private"], "outboundTag": "direct"},
-   {"network": "udp", "port": "443", "outboundTag": "block"},
-   {"network": "tcp,udp", "balancerTag": "main"}]}}
+  ob("th1", "45.91.134.23", "cdn.zpq.ai", pbk)])
+# Адрес th1 здесь — 45.91.134.23, прямой вход, тот же, что у «TH failover», а не
+# 45.91.134.19 из эксперимента: на проводе транспорт тот же, разница только
+# серверная (fallback вместо отдельного inbound), и путь не зависит ни от
+# единицы sni, ни от PROXY protocol (ADR 2026-10-07-1123, п. 2).
+cfg_mobile = cfg_for("TH mobile", [
+  ob_xhttp("th2-xhttp", "160.236.128.28", "cdn2.zpq.ai", pub2),
+  ob_xhttp("th1-xhttp", "45.91.134.23", "cdn.zpq.ai", pbk)])
 json.dump(cfg, open(sys.argv[1], "w"), ensure_ascii=False, indent=1)
-' "$OUT"
+json.dump(cfg_mobile, open(sys.argv[2], "w"), ensure_ascii=False, indent=1)
+' "$OUT" "$OUT_MOBILE"
 unset LINK
-chmod 600 "$OUT"
-printf 'конфиг собран: основной th2 (160.236.128.28), резерв th1 (45.91.134.23)\n' >&2
-printf '%s\n' "$OUT"
+chmod 600 "$OUT" "$OUT_MOBILE"
+printf 'собрано два профиля: «TH failover» (Vision, Wi-Fi) и «TH mobile» (XHTTP, мобильная сеть); у обоих основной th2 (160.236.128.28), резерв th1 (45.91.134.23)\n' >&2
+printf '%s\n%s\n' "$OUT" "$OUT_MOBILE"
