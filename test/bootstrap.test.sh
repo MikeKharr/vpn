@@ -155,7 +155,11 @@ case_ignoreip 'пустое значение — не отказ'      1 'зап
 # Красная ветвь. Мутация адресуется НОМЕРОМ СТРОКИ: строка с `grep -Eq`
 # заменяется на прежний нестрогий образец. Если приманки выше его не
 # различают, они не проверяют ничего.
-n=$(grep -n 'F2B_OCTET}(\\\.' "$script" | head -1 | cut -d: -f1)
+# `|| true` обязателен: под `set -euo pipefail` ненайденный якорь даёт 1, и
+# pipefail выносит его наружу — набор обрывался БЕЗ итога, а задуманная ветвь
+# диагноза ниже не исполнялась вовсе. Отсутствие якоря — предмет диагноза,
+# а не причина обрыва.
+n=$(grep -n 'F2B_OCTET}(\\\.' "$script" | head -1 | cut -d: -f1 || true)
 if [ -z "$n" ]; then
   bad 'мутация образца собирается' 'строка с проверкой формы не найдена — мутацию некуда вставить'
 else
@@ -191,9 +195,11 @@ echo '--- в jail.local уезжают проверенные слова, а н�
 run_jail() {  # $1 — файл скрипта, $2 — значение FAIL2BAN_IGNOREIP; печатает jail.local
   local src="$1" value="$2" h="$work/jail-harness.sh" out="$work/jail.local"
   local a b c d
-  a=$(grep -n '^IGNOREIP="127\.0\.0\.1/8 ::1"$' "$src" | head -1 | cut -d: -f1)
+  # `|| true` у всех четырёх якорей — по той же причине, что выше: ненайденный
+  # якорь обязан дойти до «НЕТ-ФИКСТУРЫ», а не оборвать набор.
+  a=$(grep -n '^IGNOREIP="127\.0\.0\.1/8 ::1"$' "$src" | head -1 | cut -d: -f1 || true)
   b=$(awk -v s="$a" 'NR>s && $0 == "fi" { print NR; exit }' "$src")
-  d=$(grep -n '^} > /etc/fail2ban/jail\.local$' "$src" | head -1 | cut -d: -f1)
+  d=$(grep -n '^} > /etc/fail2ban/jail\.local$' "$src" | head -1 | cut -d: -f1 || true)
   c=$(awk -v e="$d" '$0 == "{" && NR < e { n = NR } END { print n }' "$src")
   if [ -z "$a" ] || [ -z "$b" ] || [ -z "$c" ] || [ -z "$d" ]; then
     echo "НЕТ-ФИКСТУРЫ a=$a b=$b c=$c d=$d"
@@ -235,7 +241,7 @@ else
   # SC2016 здесь и ниже: ищется и печатается ТЕКСТ строки скрипта, раскрывать
   # его нельзя.
   # shellcheck disable=SC2016
-  n=$(grep -n '^    IGNOREIP="\${IGNOREIP} \${a}"$' "$script" | head -1 | cut -d: -f1)
+  n=$(grep -n '^    IGNOREIP="\${IGNOREIP} \${a}"$' "$script" | head -1 | cut -d: -f1 || true)
   if [ -z "$n" ]; then
     bad 'мутация jail.local собирается' 'строка накопления внутри цикла не найдена — мутацию некуда вставить'
   else
